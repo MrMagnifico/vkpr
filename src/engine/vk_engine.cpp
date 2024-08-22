@@ -31,7 +31,7 @@ vkEngine::VulkanEngine::VulkanEngine()
     // Initialize SDL and create a window with it
     SDL_Init(SDL_INIT_VIDEO);
     SDL_WindowFlags window_flags = SDL_WINDOW_VULKAN;
-    m_window = SDL_CreateWindow("Vulkan Engine",
+    m_window = SDL_CreateWindow("vkpr",
                                 SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
                                 m_windowExtent.width, m_windowExtent.height,
                                 window_flags);
@@ -77,7 +77,8 @@ void vkEngine::VulkanEngine::initVulkan() {
 
     // Construct application instance builder with optional debug features
     vkb::InstanceBuilder builder;
-	auto instanceResult = builder.set_app_name("Render Engine")
+	auto instanceResult = builder
+        .set_app_name("vkpr")
         .set_engine_name("MonkEngine")
 		.request_validation_layers(useValidationLayers)
 		.use_default_debug_messenger()
@@ -600,26 +601,24 @@ void vkEngine::VulkanEngine::draw() {
 	VK_CHECK(vkBeginCommandBuffer(graphicsCmdBuff, &cmdBeginInfo));	
 
     // Main draw
-    // TODO: Implement
-	// // Transition main draw image into general layout and draw a gradient to it
-	// transitionImage(graphicsCmdBuff, m_packedDataImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-    // // Draw a fullscreen clear or compute effect depending on user selection
-    // switch (m_config.currentDraw) {
-    //     case vkCommon::DrawType::CLEAR:     { drawPointColorUnpack(graphicsCmdBuff); } break;
-    //     case vkCommon::DrawType::COMPUTE:   { drawPointRasterizer(graphicsCmdBuff); } break; // TODO: Use dedicated compute queue
-    //     default:                            { throw std::runtime_error("Attempted to draw unsupported draw type"); }
-    // }
-	// // Transition the draw image and the swapchain image into transfer layouts
-	// transitionImage(graphicsCmdBuff, m_packedDataImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-	// transitionImage(graphicsCmdBuff, m_swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	// // Execute a copy from the draw image to the swapchain image
-	// copyImageToImage(graphicsCmdBuff, m_packedDataImage.image, m_swapchainImages[swapchainImageIndex], m_drawExtent, m_swapchainExtent);
-    // // Transition the swapchain image to Draw Optimal so it can be rendered to by ImGUI
-    // vkEngine::transitionImage(graphicsCmdBuff, m_swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    // // Draw ImGUI to the swapchain image
-	// drawImgui(graphicsCmdBuff,  m_swapchainImageViews[swapchainImageIndex]);
-	// // Set swapchain image layout to Present so we can show it on the screen
-	// vkEngine::transitionImage(graphicsCmdBuff, m_swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    // TODO: Use more efficient barrier because transitionImage waits on EVERYTHING
+	// Draw points to packed data image
+    transitionImage(graphicsCmdBuff, m_packedDataImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    drawPointRasterizer(graphicsCmdBuff);
+    // Resolve packed data to colored image
+    transitionImage(graphicsCmdBuff, m_resolvedRenderImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    drawPointColorUnpack(graphicsCmdBuff);
+	// Transition the draw image and the swapchain image into transfer layouts
+	transitionImage(graphicsCmdBuff, m_resolvedRenderImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	transitionImage(graphicsCmdBuff, m_swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	// Execute a copy from the resolved render image to the swapchain image
+	copyImageToImage(graphicsCmdBuff, m_resolvedRenderImage.image, m_swapchainImages[swapchainImageIndex], m_drawExtent, m_swapchainExtent);
+    // Transition the swapchain image to Draw Optimal so it can be rendered to by ImGUI
+    transitionImage(graphicsCmdBuff, m_swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    // Draw ImGUI to the swapchain image
+	drawImgui(graphicsCmdBuff,  m_swapchainImageViews[swapchainImageIndex]);
+	// Set swapchain image layout to Present so we can show it on the screen
+	transitionImage(graphicsCmdBuff, m_swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
 	// Finalize the command buffer
 	VK_CHECK(vkEndCommandBuffer(graphicsCmdBuff));
@@ -652,18 +651,22 @@ void vkEngine::VulkanEngine::draw() {
 }
 
 void vkEngine::VulkanEngine::drawPointRasterizer(VkCommandBuffer computeCmdBuff) {
-    // TODO: Implement
-    // vkCommon::ComputeEffect selectedEffect = m_config.backgroundEffects[m_config.selectedEffect];
-    // vkCmdBindPipeline(computeCmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, selectedEffect.pipeline);
-	// vkCmdBindDescriptorSets(computeCmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, selectedEffect.layout, 0, 1, &m_pointRenderDataDescriptors, 0, nullptr);
-    // vkCmdPushConstants(computeCmdBuff, selectedEffect.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vkCommon::ComputePushConstants), &selectedEffect.data);
-    // vkCmdDispatch(computeCmdBuff,
-    //               static_cast<uint32_t>(std::ceil(m_drawExtent.width / 16.0)),
-    //               static_cast<uint32_t>(std::ceil(m_drawExtent.height / 16.0)), 1);
+    vkCommon::ComputePushConstants pushConstants = preparePushConstants();
+    vkCmdBindPipeline(computeCmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, m_rasterizePoints);
+	vkCmdBindDescriptorSets(computeCmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipelineLayoutCommon, 0, 1, &m_pointRenderDataDescriptors, 0, nullptr);
+    vkCmdPushConstants(computeCmdBuff, m_computePipelineLayoutCommon, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vkCommon::ComputePushConstants), &pushConstants);
+    vkCmdDispatch(computeCmdBuff, static_cast<uint32_t>(std::ceil(m_pointsBuffer.size / 64.0)), 1, 1);
 }
 
-void vkEngine::VulkanEngine::drawPointColorUnpack(VkCommandBuffer graphicsCmdBuff) {
-    // TODO: Implement
+void vkEngine::VulkanEngine::drawPointColorUnpack(VkCommandBuffer computeCmdBuff) {
+    vkCommon::ComputePushConstants pushConstants = preparePushConstants();
+    vkCmdBindPipeline(computeCmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, m_resolveRender);
+	vkCmdBindDescriptorSets(computeCmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipelineLayoutCommon, 0, 1, &m_pointRenderDataDescriptors, 0, nullptr);
+    vkCmdPushConstants(computeCmdBuff, m_computePipelineLayoutCommon, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vkCommon::ComputePushConstants), &pushConstants);
+    vkCmdDispatch(computeCmdBuff,
+                  static_cast<uint32_t>(std::ceil(m_windowExtent.width / 16.0)),
+                  static_cast<uint32_t>(std::ceil(m_windowExtent.height / 16.0)),
+                  1);
 }
 
 void vkEngine::VulkanEngine::drawImgui(VkCommandBuffer graphicsCmdBuff, VkImageView targetImageView) {
