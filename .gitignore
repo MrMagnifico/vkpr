@@ -1,0 +1,7 @@
+# BLob directories
+/bin
+/build
+/resources
+
+# Compiled shaders
+*.spv

@@ -1,0 +1,636 @@
+﻿//> includes
+#include "vk_engine.h"
+
+#include <common/constants.h>
+#include <common/vk_types.h>
+#include <engine/vk_images.h>
+#include <engine/vk_initializers.h>
+#include <engine/vk_pipelines.h>
+
+// VMA needs to be included with VMA_IMPLEMENTATION definedin only one file
+// Defining it includes the implementation of the included functions as well
+#include <imgui.h>
+#include <imgui_impl_sdl2.h>
+#include <imgui_impl_vulkan.h>
+#define VMA_IMPLEMENTATION
+#include <vk_mem_alloc.h>
+
+#include <chrono>
+#include <thread>
+
+vkEngine::VulkanEngine& vkEngine::VulkanEngine::getInstance() {
+    if (loadedEngine == nullptr) { loadedEngine = new VulkanEngine(); }
+    return *loadedEngine;
+}
+
+vkEngine::VulkanEngine::VulkanEngine()
+: m_menu(m_config) {
+    // Initialize SDL and create a window with it
+    SDL_Init(SDL_INIT_VIDEO);
+    SDL_WindowFlags window_flags = SDL_WINDOW_VULKAN;
+    m_window = SDL_CreateWindow("Vulkan Engine",
+                                SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                m_windowExtent.width, m_windowExtent.height,
+                                window_flags);
+
+    // Initialize Vulkan resources
+    initVulkan();
+    initSwapchainAndDrawSurface();
+    initCommands();
+    initSyncStructures();
+    initDescriptors();
+    initPipelines();
+    initImgui();
+
+    // Everything went fine!
+    m_isInitialized = true;
+}
+
+vkEngine::VulkanEngine::~VulkanEngine() {
+    // Destroy initialised resources
+    if (m_isInitialized) {
+        // Wait until the device has finished all operations first
+        vkDeviceWaitIdle(m_logicalDevice);
+
+        // Per-frame resources
+        for (vkUtils::DeletionQueue& frameResourceDeletor : m_frameResourceDeletors) { frameResourceDeletor.flush(); }
+
+        // Global resources
+        m_globalResourceDeletor.flush();
+    }
+
+    // Clear singleton
+    loadedEngine = nullptr;
+}
+
+void vkEngine::VulkanEngine::initVulkan() {
+    // Figure out if validation layers should be used
+    #ifdef NDEBUG
+    constexpr bool useValidationLayers = false;
+    #else
+    constexpr bool useValidationLayers = true;
+    #endif
+
+    // Construct application instance builder with optional debug features
+    vkb::InstanceBuilder builder;
+	auto instanceResult = builder.set_app_name("Render Engine")
+        .set_engine_name("MonkEngine")
+		.request_validation_layers(useValidationLayers)
+		.use_default_debug_messenger()
+		.require_api_version(1, 3, 0)
+		.build();
+
+	// Grab the instance and debug messenger 
+    VKB_CHECK(instanceResult);
+	vkb::Instance vkbInstance   = instanceResult.value();
+	m_instance                  = vkbInstance.instance;
+	m_debugMessenger            = vkbInstance.debug_messenger;
+
+    // Create surface to render to
+    SDL_Vulkan_CreateSurface(m_window, m_instance, &m_windowSurface);
+
+	// Define desired Vulkan 1.3 features
+	VkPhysicalDeviceVulkan13Features features13 = {};
+    features13.sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+	features13.dynamicRendering = true;
+	features13.synchronization2 = true;
+
+	// Define desired Vulkan 1.2 features
+	VkPhysicalDeviceVulkan12Features features12 = {};
+    features12.sType                = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+	features12.bufferDeviceAddress  = true;
+	features12.descriptorIndexing   = true;
+    features12.timelineSemaphore    = true;
+
+	// Select a gpu that can write to the SDL surface and supports Vulkan 1.3 with the correct features
+	vkb::PhysicalDeviceSelector selector { vkbInstance };
+    auto deviceSelectResult = selector
+        .set_minimum_version(1, 3)
+		.set_required_features_13(features13)
+		.set_required_features_12(features12)
+		.set_surface(m_windowSurface)
+		.select();
+    VKB_CHECK(deviceSelectResult);
+    vkb::PhysicalDevice physicalDevice = deviceSelectResult.value();
+
+	// Create physical and logical devices then acauire their handles
+	vkb::DeviceBuilder deviceBuilder{ physicalDevice };
+    auto deviceBuildResult  = deviceBuilder.build();
+    VKB_CHECK(deviceBuildResult);
+	vkb::Device vkbDevice   = deviceBuildResult.value();
+	m_physicalDevice        = physicalDevice.physical_device;
+	m_logicalDevice         = vkbDevice.device;
+
+    // Acquire dedicated compute, graphics, and transfer queues
+    // Compute
+    vkb::Result<VkQueue> computeQueueResult         = vkbDevice.get_queue(vkb::QueueType::compute);
+    VKB_CHECK(computeQueueResult);
+    m_computeQueue                                  = computeQueueResult.value();
+    vkb::Result<uint32_t> computeQueueIdxResult     = vkbDevice.get_queue_index(vkb::QueueType::compute);
+    VKB_CHECK(computeQueueIdxResult);
+	m_computeQueueFamily                            = computeQueueIdxResult.value();
+    // Graphics
+    vkb::Result<VkQueue> graphicsQueueResult        = vkbDevice.get_queue(vkb::QueueType::graphics);
+    VKB_CHECK(graphicsQueueResult);
+    m_graphicsQueue                                 = graphicsQueueResult.value();
+    vkb::Result<uint32_t> graphicsQueueIdxResult    = vkbDevice.get_queue_index(vkb::QueueType::graphics);
+    VKB_CHECK(graphicsQueueIdxResult);
+	m_graphicsQueueFamily                           = graphicsQueueIdxResult.value();
+    // Transfer
+    vkb::Result<VkQueue> transferQueueResult        = vkbDevice.get_queue(vkb::QueueType::transfer);
+    VKB_CHECK(transferQueueResult);
+    m_transferQueue                                 = transferQueueResult.value();
+    vkb::Result<uint32_t> transferQueueIdxResult    = vkbDevice.get_queue_index(vkb::QueueType::transfer);
+    VKB_CHECK(transferQueueIdxResult);
+	m_transferQueueFamily                           = transferQueueIdxResult.value();
+
+    // Initialise VMA allocator
+    VmaAllocatorCreateInfo allocatorInfo = {};
+    allocatorInfo.physicalDevice    = m_physicalDevice;
+    allocatorInfo.device            = m_logicalDevice;
+    allocatorInfo.instance          = m_instance;
+    allocatorInfo.flags             = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT; // Allows for usage of GPU memory pointers
+    vmaCreateAllocator(&allocatorInfo, &m_vmaAllocator);
+
+    // Register created resources with global destruction queue
+    m_globalResourceDeletor.pushFunction([&]() {
+        // SDL window
+        SDL_DestroyWindow(m_window);
+
+        // Core Vulkan
+        vkDestroyInstance(m_instance, nullptr);
+        vkb::destroy_debug_utils_messenger(m_instance, m_debugMessenger);
+        vkDestroyDevice(m_logicalDevice, nullptr);
+        vkDestroySurfaceKHR(m_instance, m_windowSurface, nullptr);
+        destroySwapchain();
+
+        // VMA
+        vmaDestroyAllocator(m_vmaAllocator);
+    });
+}
+
+void vkEngine::VulkanEngine::initSwapchainAndDrawSurface() { 
+    // Swapchain creation
+    createSwapchain(m_windowExtent.width, m_windowExtent.height);
+
+    // Drawing surface creation
+    VkExtent3D drawImageExtent = { m_windowExtent.width, m_windowExtent.height, 1};
+    m_drawImage.imageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+	m_drawImage.imageExtent = drawImageExtent;
+	VkImageUsageFlags drawImageUsages = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                        VK_IMAGE_USAGE_STORAGE_BIT      | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	VkImageCreateInfo imageInfo = imageCreateInfo(m_drawImage.imageFormat, drawImageUsages, drawImageExtent);
+    VmaAllocationCreateInfo imageAllocationCreateInfo = {};
+	imageAllocationCreateInfo.usage         = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+	imageAllocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    vmaCreateImage(m_vmaAllocator, &imageInfo, &imageAllocationCreateInfo, &m_drawImage.image, &m_drawImage.allocation, nullptr);
+    VkImageViewCreateInfo imageViewInfo = imageViewCreateInfo(m_drawImage.imageFormat, m_drawImage.image, VK_IMAGE_ASPECT_COLOR_BIT);
+	VK_CHECK(vkCreateImageView(m_logicalDevice, &imageViewInfo, nullptr, &m_drawImage.imageView));
+	
+    // Register created resources with global destruction queue
+    m_globalResourceDeletor.pushFunction([&]() {
+		vkDestroyImageView(m_logicalDevice, m_drawImage.imageView, nullptr);
+		vmaDestroyImage(m_vmaAllocator, m_drawImage.image, m_drawImage.allocation);
+	});
+}
+
+void vkEngine::VulkanEngine::initCommands() {
+    // Create command pool for each queue. Allow allocated buffers to be reset after creation
+    std::array<VkQueue*, NUM_QUEUES> queues                 = {&m_computeQueue, &m_graphicsQueue, &m_transferQueue};
+    std::array<uint32_t, NUM_QUEUES> queueFamilies          = {m_computeQueueFamily, m_graphicsQueueFamily, m_transferQueueFamily};
+    std::array<FrameDataCommandsArr*, NUM_QUEUES> commandResources  = {&m_framesCommandResourcesCompute, &m_framesCommandResourcesGraphics, &m_framesCommandResourcesTransfer}; 
+    for (size_t queueTypeIdx = 0; queueTypeIdx < NUM_QUEUES; queueTypeIdx++) {
+        VkQueue& queue                              = *queues[queueTypeIdx];
+        uint32_t queueFamily                        = queueFamilies[queueTypeIdx];
+        FrameDataCommandsArr& queueCommandResources = *commandResources[queueTypeIdx];
+        VkCommandPoolCreateInfo commandPoolInfo     = commandPoolCreateInfo(queueFamily, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT);
+        for (uint32_t frame = 0; frame < FRAME_OVERLAP; frame++) {
+            // Create a command pool
+            VK_CHECK(vkCreateCommandPool(m_logicalDevice, &commandPoolInfo, nullptr, &queueCommandResources[frame].commandPool));
+
+            // Allocate the default command buffer that we will use for rendering
+            VkCommandBufferAllocateInfo cmdAllocInfo = commandBufferAllocateInfo(queueCommandResources[frame].commandPool, 1);
+            VK_CHECK(vkAllocateCommandBuffers(m_logicalDevice, &cmdAllocInfo, &queueCommandResources[frame].mainCommandBuffer));
+
+            // Register created command pool with global destruction queue
+            // Buffers belonging to a pool are automatically destroyed upon its destruction
+            m_globalResourceDeletor.pushFunction([&, frame]() { vkDestroyCommandPool(m_logicalDevice, queueCommandResources[frame].commandPool, nullptr); });
+        }
+    }
+
+    // Allocate a pool and buffer for immediate commands and register pool destruction with deletion queue.
+    // Pool and buffer use the graphics queue
+    VkCommandPoolCreateInfo commandPoolInfo     = commandPoolCreateInfo(m_graphicsQueueFamily, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT);
+    VK_CHECK(vkCreateCommandPool(m_logicalDevice, &commandPoolInfo, nullptr, &m_immediateCommandPool));
+	VkCommandBufferAllocateInfo cmdAllocInfo    = vkEngine::commandBufferAllocateInfo(m_immediateCommandPool, 1);
+	VK_CHECK(vkAllocateCommandBuffers(m_logicalDevice, &cmdAllocInfo, &m_immediateCommandBuffer));
+	m_globalResourceDeletor.pushFunction([&]() { vkDestroyCommandPool(m_logicalDevice, m_immediateCommandPool, nullptr); });
+}
+
+void vkEngine::VulkanEngine::initSyncStructures() {
+	// One fence to control when the gpu has finished rendering the frame
+	// 2 semaphores to synchronize rendering with swapchain
+	// The fence starts signalled so we can wait on it on the first frame
+	VkFenceCreateInfo fenceInfoFrameData    = fenceCreateInfo(VK_FENCE_CREATE_SIGNALED_BIT);
+	VkSemaphoreCreateInfo semaphoreInfo     = semaphoreCreateInfo();
+    for (uint32_t frame = 0; frame < FRAME_OVERLAP; frame++) {
+        // Acquire handle for current frame sync data
+        FrameDataSynchronization& syncData = m_framesSynchronizationPrimitives[frame];
+
+        // Create primitives
+		VK_CHECK(vkCreateFence(m_logicalDevice, &fenceInfoFrameData, nullptr, &syncData.drawEnd));
+		VK_CHECK(vkCreateSemaphore(m_logicalDevice, &semaphoreInfo, nullptr, &syncData.swapchainToRender));
+		VK_CHECK(vkCreateSemaphore(m_logicalDevice, &semaphoreInfo, nullptr, &syncData.renderToPresent));
+
+        // Register primitives with global destruction queue
+        m_globalResourceDeletor.pushFunction([&, frame]() {
+            vkDestroyFence(m_logicalDevice, syncData.drawEnd, nullptr);
+            vkDestroySemaphore(m_logicalDevice, syncData.swapchainToRender, nullptr);
+            vkDestroySemaphore(m_logicalDevice, syncData.renderToPresent, nullptr);    
+        });
+	}
+
+    // Immediate submission fence creation and deletion queue registration
+    VkFenceCreateInfo fenceInfoImmediate = fenceCreateInfo(VK_FENCE_CREATE_SIGNALED_BIT);
+    VK_CHECK(vkCreateFence(m_logicalDevice, &fenceInfoImmediate, nullptr, &m_immediateFence));
+	m_globalResourceDeletor.pushFunction([&]() { vkDestroyFence(m_logicalDevice, m_immediateFence, nullptr); });
+}
+
+void vkEngine::VulkanEngine::initDescriptors() {
+	// Create a descriptor pool that will hold 10 sets with 1 image each
+	std::vector<DescriptorAllocator::PoolSizeRatio> sizes = {{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 }};
+	m_globalDescriptorAllocator.initPool(m_logicalDevice, 10, sizes);
+
+	// Make the descriptor set layout for our compute draw
+	DescriptorLayoutBuilder builder;
+    builder.addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    m_drawImageDescriptorLayout = builder.build(m_logicalDevice, VK_SHADER_STAGE_COMPUTE_BIT);
+
+    // Allocate a descriptor set for our draw image
+	m_drawImageDescriptors = m_globalDescriptorAllocator.allocate(m_logicalDevice, m_drawImageDescriptorLayout);	
+	VkDescriptorImageInfo imgInfo = {};
+	imgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+	imgInfo.imageView   = m_drawImage.imageView;
+	VkWriteDescriptorSet drawImageWrite = {};
+	drawImageWrite.sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	drawImageWrite.pNext            = nullptr;
+	drawImageWrite.dstBinding       = 0;
+	drawImageWrite.dstSet           = m_drawImageDescriptors;
+	drawImageWrite.descriptorCount  = 1;
+	drawImageWrite.descriptorType   = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	drawImageWrite.pImageInfo       = &imgInfo;
+	vkUpdateDescriptorSets(m_logicalDevice, 1, &drawImageWrite, 0, nullptr);
+
+	// Register the global descriptor allocator and created descriptor layout with global destruction queue 
+	m_globalResourceDeletor.pushFunction([&]() {
+		m_globalDescriptorAllocator.destroyPool(m_logicalDevice);
+		vkDestroyDescriptorSetLayout(m_logicalDevice, m_drawImageDescriptorLayout, nullptr);
+	});
+}
+
+void vkEngine::VulkanEngine::initPipelines() {
+    // Create default compute pipeline layout
+    VkPipelineLayoutCreateInfo computeLayout = {};
+	computeLayout.sType             = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	computeLayout.pNext             = nullptr;
+	computeLayout.pSetLayouts       = &m_drawImageDescriptorLayout;
+	computeLayout.setLayoutCount    = 1;
+    // Define structure of push constants
+    VkPushConstantRange pushConstant = {};
+    pushConstant.offset                     = 0;
+    pushConstant.size                       = sizeof(vkCommon::ComputePushConstants);
+    pushConstant.stageFlags                 = VK_SHADER_STAGE_COMPUTE_BIT;
+    computeLayout.pPushConstantRanges       = &pushConstant;
+    computeLayout.pushConstantRangeCount    = 1;
+	VK_CHECK(vkCreatePipelineLayout(m_logicalDevice, &computeLayout, nullptr, &m_computePipelineLayoutCommon));
+
+    // Load shader code for our background compute effects
+    VkShaderModule gradientShader;
+    std::filesystem::path gradientShaderPath = vkCommon::constants::SHADERS_DIR_PATH / "gradient.comp.spv";
+	if (!vkEngine::loadShaderModule(gradientShaderPath.string().c_str(), m_logicalDevice, &gradientShader)) {
+		throw std::runtime_error("Error loading gradient compute shader");
+	}
+    VkShaderModule gradientColorShader;
+    std::filesystem::path gradientColorShaderPath = vkCommon::constants::SHADERS_DIR_PATH / "gradient_color.comp.spv";
+	if (!vkEngine::loadShaderModule(gradientColorShaderPath.string().c_str(), m_logicalDevice, &gradientColorShader)) {
+		throw std::runtime_error("Error loading gradient color compute shader");
+	}
+    VkShaderModule skyShader;
+    std::filesystem::path skyShaderPath = vkCommon::constants::SHADERS_DIR_PATH / "sky.comp.spv";
+	if (!vkEngine::loadShaderModule(skyShaderPath.string().c_str(), m_logicalDevice, &skyShader)) {
+		throw std::runtime_error("Error loading sky compute shader");
+	}
+
+    // Compute pipeline has only a single stage. We create it here and specify the shader to be used on a per effect basis 
+	VkPipelineShaderStageCreateInfo stageinfo = {};
+	stageinfo.sType     = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stageinfo.pNext     = nullptr;
+	stageinfo.stage     = VK_SHADER_STAGE_COMPUTE_BIT;
+	stageinfo.pName     = "main";
+
+    // Define the layout of our pipelines
+	VkComputePipelineCreateInfo computePipelineCreateInfo = {};
+	computePipelineCreateInfo.sType     = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+	computePipelineCreateInfo.pNext     = nullptr;
+	computePipelineCreateInfo.layout    = m_computePipelineLayoutCommon;
+	computePipelineCreateInfo.stage     = stageinfo;
+
+    // Create our pipelines and associated data (name and push constant data)
+    // Gradient
+    computePipelineCreateInfo.stage.module = gradientShader;
+    vkCommon::ComputeEffect gradient = {};
+    gradient.layout     = m_computePipelineLayoutCommon;
+    gradient.name       = "Gradient";
+    gradient.data       = {};
+    VK_CHECK(vkCreateComputePipelines(m_logicalDevice, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &gradient.pipeline));
+    // Gradient color
+    computePipelineCreateInfo.stage.module = gradientColorShader;
+    vkCommon::ComputeEffect gradientColor = {};
+    gradientColor.layout        = m_computePipelineLayoutCommon;
+    gradientColor.name          = "Gradient Color";
+    gradientColor.data          = {};
+    gradientColor.data.data1    = glm::vec4(1, 0, 0, 1);
+    gradientColor.data.data2    = glm::vec4(0, 0, 1, 1);
+    VK_CHECK(vkCreateComputePipelines(m_logicalDevice, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &gradientColor.pipeline));
+    // Sky
+    computePipelineCreateInfo.stage.module = skyShader;
+    vkCommon::ComputeEffect sky = {};
+    sky.layout      = m_computePipelineLayoutCommon;
+    sky.name        = "Sky";
+    sky.data        = {};
+    sky.data.data1  = glm::vec4(0.1, 0.2, 0.4, 0.97);
+    VK_CHECK(vkCreateComputePipelines(m_logicalDevice, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &sky.pipeline));
+    
+    // Register effects with compute effects list and update config accordingly
+    m_config.backgroundEffects.push_back(gradient);
+    m_config.backgroundEffects.push_back(gradientColor);
+    m_config.backgroundEffects.push_back(sky);
+
+    // Destroy the loaded shaders (as they have already been embedded in their respective pipelines)
+    // and register the created pipelines and their layouts with the global destruction queue
+    vkDestroyShaderModule(m_logicalDevice, gradientShader, nullptr);
+    vkDestroyShaderModule(m_logicalDevice, gradientColorShader, nullptr);
+    vkDestroyShaderModule(m_logicalDevice, skyShader, nullptr);
+	m_globalResourceDeletor.pushFunction([=]() {
+		vkDestroyPipelineLayout(m_logicalDevice, m_computePipelineLayoutCommon, nullptr);
+		vkDestroyPipeline(m_logicalDevice, gradient.pipeline, nullptr);
+        vkDestroyPipeline(m_logicalDevice, gradientColor.pipeline, nullptr);
+        vkDestroyPipeline(m_logicalDevice, sky.pipeline, nullptr);
+    });
+}
+
+void vkEngine::VulkanEngine::initImgui() {
+    // Define descriptor pool sizes for all kinds of resources ImGUI might need. It's a bit oversized
+    // TODO: Potential sources of bugs if enough UI elements are used and more resources are required
+	VkDescriptorPoolSize poolSizes[] = {
+        { VK_DESCRIPTOR_TYPE_SAMPLER, 10 },
+		{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 10 },
+		{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 10 },
+		{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 10 },
+		{ VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 10 },
+		{ VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 10 },
+		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10 },
+		{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10 },
+		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 10 },
+		{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 10 },
+		{ VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 10 } };
+
+    // Create the descriptor pool
+	VkDescriptorPoolCreateInfo poolInfo = {};
+	poolInfo.sType          = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	poolInfo.flags          = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+	poolInfo.maxSets        = 10;
+	poolInfo.poolSizeCount  = static_cast<uint32_t>(std::size(poolSizes));
+	poolInfo.pPoolSizes     = poolSizes;
+	VkDescriptorPool imguiPool;
+	VK_CHECK(vkCreateDescriptorPool(m_logicalDevice, &poolInfo, nullptr, &imguiPool));
+
+	// Init ImGUI
+    // TODO: Maybe use a different queue for ImGUI submissions
+	ImGui::CreateContext();                 // Init core structures
+	ImGui_ImplSDL2_InitForVulkan(m_window); // Init SDL and Vulkan implementation
+	ImGui_ImplVulkan_InitInfo initInfo = {};
+	initInfo.Instance       = m_instance;
+	initInfo.PhysicalDevice = m_physicalDevice;
+	initInfo.Device         = m_logicalDevice;
+	initInfo.Queue          = m_graphicsQueue; // Use main graphics queue for command
+	initInfo.DescriptorPool = imguiPool;
+	initInfo.MinImageCount  = 3;
+	initInfo.ImageCount     = 3;
+	// Dynamic rendering usage and parameters
+	initInfo.UseDynamicRendering                                    = true;
+	initInfo.PipelineRenderingCreateInfo                            = {};
+    initInfo.PipelineRenderingCreateInfo.sType                      = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+	initInfo.PipelineRenderingCreateInfo.colorAttachmentCount       = 1;
+	initInfo.PipelineRenderingCreateInfo.pColorAttachmentFormats    = &m_swapchainImageFormat;
+	initInfo.MSAASamples                                            = VK_SAMPLE_COUNT_1_BIT;
+	ImGui_ImplVulkan_Init(&initInfo);
+	ImGui_ImplVulkan_CreateFontsTexture();
+
+	// Register ImGUI shutdown function and descriptor pool with destruction queue
+	m_globalResourceDeletor.pushFunction([&]() {
+		ImGui_ImplVulkan_Shutdown();
+		vkDestroyDescriptorPool(m_logicalDevice, imguiPool, nullptr);
+	});
+}
+
+void vkEngine::VulkanEngine::createSwapchain(uint32_t width, uint32_t height) {
+	// Build swapchain
+    m_swapchainImageFormat      = VK_FORMAT_B8G8R8A8_UNORM;
+    vkb::SwapchainBuilder swapchainBuilder{m_physicalDevice, m_logicalDevice, m_windowSurface};
+	auto swapchainBuildResult   = swapchainBuilder
+		.set_desired_format(VkSurfaceFormatKHR{.format = m_swapchainImageFormat, .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
+		.set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR) // TODO: Make adjustable
+		.set_desired_extent(width, height)
+		.add_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+		.build();
+    VKB_CHECK(swapchainBuildResult);
+
+    // Acquire handle to swapchain info and resources
+    vkb::Swapchain vkbSwapchain = swapchainBuildResult.value();
+	m_swapchainExtent           = vkbSwapchain.extent;
+	m_swapchain                 = vkbSwapchain.swapchain;
+	m_swapchainImages           = vkbSwapchain.get_images().value();
+	m_swapchainImageViews       = vkbSwapchain.get_image_views().value();
+}
+
+void vkEngine::VulkanEngine::destroySwapchain() {
+	for (VkImageView& imageView : m_swapchainImageViews) { vkDestroyImageView(m_logicalDevice, imageView, nullptr); }
+    vkDestroySwapchainKHR(m_logicalDevice, m_swapchain, nullptr);
+}
+
+vkEngine::FrameDataCommands& vkEngine::VulkanEngine::commandGetCurrentFrame(vkb::QueueType familyType) {
+    switch (familyType) {
+        case vkb::QueueType::compute:  { return m_framesCommandResourcesCompute[m_frameNumber % FRAME_OVERLAP]; } break;
+        case vkb::QueueType::graphics: { return m_framesCommandResourcesGraphics[m_frameNumber % FRAME_OVERLAP]; } break;
+        case vkb::QueueType::transfer: { return m_framesCommandResourcesTransfer[m_frameNumber % FRAME_OVERLAP]; } break;
+        default: throw std::runtime_error("Attempted to acquire frame command resources of unsupported queue type");
+    }
+}
+
+void vkEngine::VulkanEngine::immediateSubmit(std::function<void(VkCommandBuffer cmd)>&& commandRegistration) {
+    // Reset immediate resources
+    VK_CHECK(vkResetFences(m_logicalDevice, 1, &m_immediateFence));
+	VK_CHECK(vkResetCommandBuffer(m_immediateCommandBuffer, 0));
+
+    // Record immediate command buffer
+	VkCommandBufferBeginInfo cmdBeginInfo = vkEngine::commandBufferBeginInfo(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+	VK_CHECK(vkBeginCommandBuffer(m_immediateCommandBuffer, &cmdBeginInfo));
+	commandRegistration(m_immediateCommandBuffer);
+	VK_CHECK(vkEndCommandBuffer(m_immediateCommandBuffer));
+
+    // Submit immediate command buffer to graphics queue and wait for its submission fence
+	VkCommandBufferSubmitInfo cmdInfo   = vkEngine::commandBufferSubmitInfo(m_immediateCommandBuffer);
+	VkSubmitInfo2 submitInfo            = vkEngine::submitInfo(&cmdInfo, nullptr, nullptr);
+	VK_CHECK(vkQueueSubmit2(m_graphicsQueue, 1, &submitInfo, m_immediateFence));
+	VK_CHECK(vkWaitForFences(m_logicalDevice, 1, &m_immediateFence, true, BLOCKING_TIMEOUT_NS));
+}
+
+void vkEngine::VulkanEngine::draw() {
+    // Acquire current frame command and sync primitives handles
+    FrameDataCommands& currentFrameGraphicsCommandResources         = commandGetCurrentFrame(vkb::QueueType::graphics);
+    FrameDataSynchronization& currentFrameSynchronizationPrimitives = syncGetCurrentFrame();
+    VkCommandBuffer graphicsCmdBuff                                 = currentFrameGraphicsCommandResources.mainCommandBuffer;
+    vkUtils::DeletionQueue& frameResourcesDeletor                   = resourceDeletorGetCurrentFrame(); 
+
+    // Wait until the GPU has finished rendering the last frame and delet objects created for that specific frame
+	VK_CHECK(vkWaitForFences(m_logicalDevice, 1, &currentFrameSynchronizationPrimitives.drawEnd, true, BLOCKING_TIMEOUT_NS));
+	VK_CHECK(vkResetFences(m_logicalDevice, 1, &currentFrameSynchronizationPrimitives.drawEnd));
+    frameResourcesDeletor.flush();
+
+    // Request image from the swapchain
+	uint32_t swapchainImageIndex;
+	VK_CHECK(vkAcquireNextImageKHR(m_logicalDevice, m_swapchain, BLOCKING_TIMEOUT_NS,
+                                   currentFrameSynchronizationPrimitives.swapchainToRender, nullptr, &swapchainImageIndex));
+
+    // Define drawing surface extent
+    m_drawExtent.width  = m_drawImage.imageExtent.width;
+	m_drawExtent.height = m_drawImage.imageExtent.height;
+
+    // Begin graphics command buffer recording
+    VK_CHECK(vkResetCommandBuffer(graphicsCmdBuff, 0));
+	VkCommandBufferBeginInfo cmdBeginInfo = commandBufferBeginInfo(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT); // This buffer will be submitted only once
+	VK_CHECK(vkBeginCommandBuffer(graphicsCmdBuff, &cmdBeginInfo));	
+
+    // Main draw
+	// Transition main draw image into general layout and draw a gradient to it
+	transitionImage(graphicsCmdBuff, m_drawImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    // Draw a fullscreen clear or compute effect depending on user selection
+    switch (m_config.currentDraw) {
+        case vkCommon::DrawType::CLEAR:     { drawClear(graphicsCmdBuff); } break;
+        case vkCommon::DrawType::COMPUTE:   { drawComputeBackgroundEffect(graphicsCmdBuff); } break; // TODO: Use dedicated compute queue
+        default:                            { throw std::runtime_error("Attempted to draw unsupported draw type"); }
+    }
+	// Transition the draw image and the swapchain image into transfer layouts
+	transitionImage(graphicsCmdBuff, m_drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	transitionImage(graphicsCmdBuff, m_swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	// Execute a copy from the draw image to the swapchain image
+	copyImageToImage(graphicsCmdBuff, m_drawImage.image, m_swapchainImages[swapchainImageIndex], m_drawExtent, m_swapchainExtent);
+    // Transition the swapchain image to Draw Optimal so it can be rendered to by ImGUI
+    vkEngine::transitionImage(graphicsCmdBuff, m_swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    // Draw ImGUI to the swapchain image
+	drawImgui(graphicsCmdBuff,  m_swapchainImageViews[swapchainImageIndex]);
+	// Set swapchain image layout to Present so we can show it on the screen
+	vkEngine::transitionImage(graphicsCmdBuff, m_swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
+	// Finalize the command buffer
+	VK_CHECK(vkEndCommandBuffer(graphicsCmdBuff));
+
+    // Prepare the submission to the graphics queue 
+	// We wait on swapchainToRender as that semaphore is signaled when the swapchain is ready
+	// We signal renderToPresent to signal that rendering has finished
+	VkCommandBufferSubmitInfo cmdinfo   = commandBufferSubmitInfo(graphicsCmdBuff);	
+	VkSemaphoreSubmitInfo waitInfo      = semaphoreSubmitInfo(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR, currentFrameSynchronizationPrimitives.swapchainToRender);
+	VkSemaphoreSubmitInfo signalInfo    = semaphoreSubmitInfo(VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, currentFrameSynchronizationPrimitives.renderToPresent);	
+	VkSubmitInfo2 submit                = submitInfo(&cmdinfo, &signalInfo, &waitInfo);	
+
+	// Submit command buffer to the graphics queue and execute it.
+	// drawEnd will be signalled once the command buffer has finished execution
+	VK_CHECK(vkQueueSubmit2(m_graphicsQueue, 1, &submit, currentFrameSynchronizationPrimitives.drawEnd));
+
+    // Present the image via the graphics queue once the command buffer has finished its work
+    VkPresentInfoKHR presentInfo = {};
+	presentInfo.sType               = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+	presentInfo.pNext               = nullptr;
+	presentInfo.pSwapchains         = &m_swapchain;
+	presentInfo.swapchainCount      = 1;
+	presentInfo.pWaitSemaphores     = &currentFrameSynchronizationPrimitives.renderToPresent;
+	presentInfo.waitSemaphoreCount  = 1;
+	presentInfo.pImageIndices       = &swapchainImageIndex;
+	VK_CHECK(vkQueuePresentKHR(m_graphicsQueue, &presentInfo));
+
+    // Increment current frame counter
+    m_frameNumber++;
+}
+
+void vkEngine::VulkanEngine::drawClear(VkCommandBuffer graphicsCmdBuff) {
+    VkClearColorValue clearValue;
+	float flash                     = std::abs(std::sin(m_frameNumber / 144.0f));   // Flash with 144fps period
+    glm::vec4 flashAdjustedColor    = flash * m_config.clearColor;                  // Flash user-selected color
+	clearValue                      = { { flashAdjustedColor.r,
+                                          flashAdjustedColor.g,
+                                          flashAdjustedColor.b,
+                                          flashAdjustedColor.a } };
+	VkImageSubresourceRange clearRange = imageSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
+    vkCmdClearColorImage(graphicsCmdBuff, m_drawImage.image, VK_IMAGE_LAYOUT_GENERAL, &clearValue, 1, &clearRange);
+}
+
+void vkEngine::VulkanEngine::drawComputeBackgroundEffect(VkCommandBuffer computeCmdBuff) {
+    vkCommon::ComputeEffect selectedEffect = m_config.backgroundEffects[m_config.selectedEffect];
+    vkCmdBindPipeline(computeCmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, selectedEffect.pipeline);
+	vkCmdBindDescriptorSets(computeCmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, selectedEffect.layout, 0, 1, &m_drawImageDescriptors, 0, nullptr);
+    vkCmdPushConstants(computeCmdBuff, selectedEffect.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vkCommon::ComputePushConstants), &selectedEffect.data);
+    vkCmdDispatch(computeCmdBuff,
+                  static_cast<uint32_t>(std::ceil(m_drawExtent.width / 16.0)),
+                  static_cast<uint32_t>(std::ceil(m_drawExtent.height / 16.0)), 1);
+}
+
+void vkEngine::VulkanEngine::drawImgui(VkCommandBuffer graphicsCmdBuff, VkImageView targetImageView) {
+    VkRenderingAttachmentInfo colorAttachment   = vkEngine::attachmentInfo(targetImageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	VkRenderingInfo renderInfo                  = vkEngine::renderingInfo(m_swapchainExtent, &colorAttachment, nullptr);
+	vkCmdBeginRendering(graphicsCmdBuff, &renderInfo);
+	ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), graphicsCmdBuff);
+	vkCmdEndRendering(graphicsCmdBuff);
+}
+
+void vkEngine::VulkanEngine::run() {
+    SDL_Event event;
+    bool shouldRun = true;
+
+    while (shouldRun) {
+        // Handle events in SDL queue
+        while (SDL_PollEvent(&event) != 0) {
+            switch (event.type) {
+                case SDL_QUIT: {
+                    shouldRun = false;
+                } break;
+                case SDL_WINDOWEVENT: {
+                    if (event.window.event == SDL_WINDOWEVENT_MINIMIZED)        { m_shouldRender = false; }
+                    else if (event.window.event == SDL_WINDOWEVENT_RESTORED)    { m_shouldRender = true; }
+                } break;
+                case SDL_KEYUP: {
+                    if (event.key.keysym.sym == SDLK_ESCAPE) { shouldRun = false; }
+                } break;
+            }
+
+            // Send event to ImGUI for its processing
+            ImGui_ImplSDL2_ProcessEvent(&event);
+        }
+
+        // Do not draw if we are minimized
+        if (!m_shouldRender) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Throttle the speed to avoid the endless spinning
+            continue;
+        }
+
+        // Make ImGUI prepare the structures needed for drawing
+        ImGui_ImplVulkan_NewFrame();
+        ImGui_ImplSDL2_NewFrame();
+        ImGui::NewFrame();
+        m_menu.draw();
+        ImGui::Render();
+
+        // Main draw entrypoint
+        draw();
+    }
+}
