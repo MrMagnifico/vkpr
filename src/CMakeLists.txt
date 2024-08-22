@@ -6,6 +6,8 @@ add_executable(vkpr
   "engine/vk_pipelines.cpp"
   "engine/vk_engine.cpp"
   "engine/vk_loader.cpp"
+
+  "io/points.cpp"
   
   "ui/camera.cpp"
   "ui/menu.cpp"

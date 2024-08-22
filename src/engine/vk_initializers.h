@@ -30,11 +30,18 @@ VkImageSubresourceRange imageSubresourceRange(VkImageAspectFlags aspectMask);
 
 // Commands
 VkSemaphoreSubmitInfo semaphoreSubmitInfo(VkPipelineStageFlags2 stageMask, VkSemaphore semaphore);
+
+// Descriptor sets
 VkDescriptorSetLayoutBinding descriptorSetLayoutBinding(VkDescriptorType type, VkShaderStageFlags stageFlags, uint32_t binding);
 VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCreateInfo(VkDescriptorSetLayoutBinding* bindings, uint32_t bindingCount);
 VkWriteDescriptorSet writeDescriptorImage(VkDescriptorType type, VkDescriptorSet dstSet, VkDescriptorImageInfo* imageInfo, uint32_t binding);
 VkWriteDescriptorSet writeDescriptorBuffer(VkDescriptorType type, VkDescriptorSet dstSet, VkDescriptorBufferInfo* bufferInfo, uint32_t binding);
 VkDescriptorBufferInfo bufferInfo(VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range);
+
+// Buffer creation
+VkBufferCreateInfo bufferConcurrentCreateInfo(VkDeviceSize size, VkBufferUsageFlags usage, std::vector<uint32_t> queueFamilyIndices,
+                                              VkBufferCreateFlags flags = {});
+VkBufferCreateInfo bufferExclusiveCreateInfo(VkDeviceSize size, VkBufferUsageFlags usages, VkBufferCreateFlags flags = {});
 
 // Image creation
 VkImageCreateInfo imageCreateInfo(VkFormat format, VkImageUsageFlags usageFlags, VkExtent3D extent);

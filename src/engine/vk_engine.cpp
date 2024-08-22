@@ -6,6 +6,7 @@
 #include <engine/vk_images.h>
 #include <engine/vk_initializers.h>
 #include <engine/vk_pipelines.h>
+#include <io/points.h>
 
 // VMA needs to be included with VMA_IMPLEMENTATION definedin only one file
 // Defining it includes the implementation of the included functions as well
@@ -16,7 +17,9 @@
 #include <vk_mem_alloc.h>
 
 #include <chrono>
+#include <filesystem>
 #include <thread>
+
 
 vkEngine::VulkanEngine& vkEngine::VulkanEngine::getInstance() {
     if (loadedEngine == nullptr) { loadedEngine = new VulkanEngine(); }
@@ -35,9 +38,10 @@ vkEngine::VulkanEngine::VulkanEngine()
 
     // Initialize Vulkan resources
     initVulkan();
-    initSwapchainAndDrawSurface();
+    initSwapchainAndDrawSurfaces();
     initCommands();
     initSyncStructures();
+    initPointBuffers();
     initDescriptors();
     initPipelines();
     initImgui();
@@ -89,6 +93,11 @@ void vkEngine::VulkanEngine::initVulkan() {
     // Create surface to render to
     SDL_Vulkan_CreateSurface(m_window, m_instance, &m_windowSurface);
 
+    // Define required atomic features
+    VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT imageAtomicFeatures = {};
+    imageAtomicFeatures.sType                   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_IMAGE_ATOMIC_INT64_FEATURES_EXT;
+    imageAtomicFeatures.shaderImageInt64Atomics = true;
+
 	// Define desired Vulkan 1.3 features
 	VkPhysicalDeviceVulkan13Features features13 = {};
     features13.sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
@@ -97,17 +106,26 @@ void vkEngine::VulkanEngine::initVulkan() {
 
 	// Define desired Vulkan 1.2 features
 	VkPhysicalDeviceVulkan12Features features12 = {};
-    features12.sType                = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-	features12.bufferDeviceAddress  = true;
-	features12.descriptorIndexing   = true;
-    features12.timelineSemaphore    = true;
+    features12.sType                    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+	features12.bufferDeviceAddress      = true;
+	features12.descriptorIndexing       = true;
+    features12.timelineSemaphore        = true;
+    features12.shaderBufferInt64Atomics = true;
+    features12.shaderSharedInt64Atomics = true;
+
+    // Define require core physical features
+    VkPhysicalDeviceFeatures featuresCore = {};
+    featuresCore.shaderInt64 = true;
 
 	// Select a gpu that can write to the SDL surface and supports Vulkan 1.3 with the correct features
 	vkb::PhysicalDeviceSelector selector { vkbInstance };
     auto deviceSelectResult = selector
         .set_minimum_version(1, 3)
+        .add_required_extension("VK_EXT_shader_image_atomic_int64")
+        .add_required_extension_features(imageAtomicFeatures)
 		.set_required_features_13(features13)
 		.set_required_features_12(features12)
+        .set_required_features(featuresCore)
 		.set_surface(m_windowSurface)
 		.select();
     VKB_CHECK(deviceSelectResult);
@@ -169,28 +187,40 @@ void vkEngine::VulkanEngine::initVulkan() {
     });
 }
 
-void vkEngine::VulkanEngine::initSwapchainAndDrawSurface() { 
+void vkEngine::VulkanEngine::initSwapchainAndDrawSurfaces() { 
     // Swapchain creation
     createSwapchain(m_windowExtent.width, m_windowExtent.height);
 
-    // Drawing surface creation
+    // Common initialisation data
     VkExtent3D drawImageExtent = { m_windowExtent.width, m_windowExtent.height, 1};
-    m_drawImage.imageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-	m_drawImage.imageExtent = drawImageExtent;
-	VkImageUsageFlags drawImageUsages = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                                        VK_IMAGE_USAGE_STORAGE_BIT      | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-	VkImageCreateInfo imageInfo = imageCreateInfo(m_drawImage.imageFormat, drawImageUsages, drawImageExtent);
     VmaAllocationCreateInfo imageAllocationCreateInfo = {};
 	imageAllocationCreateInfo.usage         = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 	imageAllocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    vmaCreateImage(m_vmaAllocator, &imageInfo, &imageAllocationCreateInfo, &m_drawImage.image, &m_drawImage.allocation, nullptr);
-    VkImageViewCreateInfo imageViewInfo = imageViewCreateInfo(m_drawImage.imageFormat, m_drawImage.image, VK_IMAGE_ASPECT_COLOR_BIT);
-	VK_CHECK(vkCreateImageView(m_logicalDevice, &imageViewInfo, nullptr, &m_drawImage.imageView));
+
+    // Packed data image
+    m_packedDataImage.imageFormat = VK_FORMAT_R64_SINT;
+	m_packedDataImage.imageExtent = drawImageExtent;
+	VkImageUsageFlags packedDataImageUsages = VK_IMAGE_USAGE_STORAGE_BIT;
+	VkImageCreateInfo packedDataInfo = imageCreateInfo(m_packedDataImage.imageFormat, packedDataImageUsages, drawImageExtent);
+    vmaCreateImage(m_vmaAllocator, &packedDataInfo, &imageAllocationCreateInfo, &m_packedDataImage.image, &m_packedDataImage.allocation, nullptr);
+    VkImageViewCreateInfo packedDataViewInfo = imageViewCreateInfo(m_packedDataImage.imageFormat, m_packedDataImage.image, VK_IMAGE_ASPECT_COLOR_BIT);
+	VK_CHECK(vkCreateImageView(m_logicalDevice, &packedDataViewInfo, nullptr, &m_packedDataImage.imageView));
 	
+    // Render resolve image
+    m_resolvedRenderImage.imageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+    m_resolvedRenderImage.imageExtent = drawImageExtent;
+    VkImageUsageFlags resolvedRenderImageUsages = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+    VkImageCreateInfo resolvedRenderInfo = imageCreateInfo(m_resolvedRenderImage.imageFormat, resolvedRenderImageUsages, drawImageExtent);
+    vmaCreateImage(m_vmaAllocator, &resolvedRenderInfo, &imageAllocationCreateInfo, &m_resolvedRenderImage.image, &m_resolvedRenderImage.allocation, nullptr);
+    VkImageViewCreateInfo resolvedRenderViewInfo = imageViewCreateInfo(m_resolvedRenderImage.imageFormat, m_resolvedRenderImage.image, VK_IMAGE_ASPECT_COLOR_BIT);
+    VK_CHECK(vkCreateImageView(m_logicalDevice, &resolvedRenderViewInfo, nullptr, &m_resolvedRenderImage.imageView));
+
     // Register created resources with global destruction queue
     m_globalResourceDeletor.pushFunction([&]() {
-		vkDestroyImageView(m_logicalDevice, m_drawImage.imageView, nullptr);
-		vmaDestroyImage(m_vmaAllocator, m_drawImage.image, m_drawImage.allocation);
+		vkDestroyImageView(m_logicalDevice, m_packedDataImage.imageView, nullptr);
+		vmaDestroyImage(m_vmaAllocator, m_packedDataImage.image, m_packedDataImage.allocation);
+        vkDestroyImageView(m_logicalDevice, m_resolvedRenderImage.imageView, nullptr);
+		vmaDestroyImage(m_vmaAllocator, m_resolvedRenderImage.image, m_resolvedRenderImage.allocation);
 	});
 }
 
@@ -256,35 +286,122 @@ void vkEngine::VulkanEngine::initSyncStructures() {
 	m_globalResourceDeletor.pushFunction([&]() { vkDestroyFence(m_logicalDevice, m_immediateFence, nullptr); });
 }
 
+void vkEngine::VulkanEngine::initPointBuffers() {
+    // TODO: Make point cloud file selectable via GUI and abstract this away
+    // Load point cloud data
+    const std::filesystem::path dataFilePath = vkCommon::constants::RESOURCES_DIR_PATH / "griffin.obj";
+    std::vector<vkIo::Point> pointData;
+    vkIo::readPointCloud(dataFilePath.string().c_str(), pointData, m_modelMin, m_modelMax);
+
+    // Init buffers
+    // Common
+    m_pointsBuffer.size = m_pointsStagingBuffer.size = pointData.size();
+    // Device buffer
+    VkBufferCreateInfo devBuffCreateInfo = vkEngine::bufferExclusiveCreateInfo(m_pointsBuffer.sizeBytes(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    VmaAllocationCreateInfo devBuffAllocCreateInfo = {};
+	devBuffAllocCreateInfo.usage            = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+	devBuffAllocCreateInfo.requiredFlags    = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    vmaCreateBuffer(m_vmaAllocator, &devBuffCreateInfo, &devBuffAllocCreateInfo, &m_pointsBuffer.buffer, &m_pointsBuffer.allocation, nullptr);
+    // Host/Staging buffer
+    VkBufferCreateInfo stagingBuffCreateInfo = vkEngine::bufferExclusiveCreateInfo(m_pointsStagingBuffer.sizeBytes(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    VmaAllocationCreateInfo stagingBuffAllocCreateInfo = {};
+    stagingBuffAllocCreateInfo.usage            = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+    stagingBuffAllocCreateInfo.flags            = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+    stagingBuffAllocCreateInfo.requiredFlags    = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    vmaCreateBuffer(m_vmaAllocator, &stagingBuffCreateInfo, &stagingBuffAllocCreateInfo, &m_pointsStagingBuffer.buffer, &m_pointsStagingBuffer.allocation, nullptr);
+
+    // Copy point data to staging buffer
+    vkIo::Point* pointsMapped;
+    vmaMapMemory(m_vmaAllocator, m_pointsStagingBuffer.allocation, (void**) &pointsMapped);
+    std::memcpy(pointsMapped, pointData.data(), m_pointsStagingBuffer.sizeBytes());
+    vmaUnmapMemory(m_vmaAllocator, m_pointsStagingBuffer.allocation);
+    vmaFlushAllocation(m_vmaAllocator, m_pointsStagingBuffer.allocation, 0U, VK_WHOLE_SIZE);
+
+    // Copy point data from staging buffer to device memory buffer using immediate submit and wait for operation completion host-side
+    VkBufferCopy stagingCopy    = {};
+    stagingCopy.srcOffset       = 0;
+    stagingCopy.dstOffset       = 0;
+    stagingCopy.size            = m_pointsStagingBuffer.sizeBytes();
+    VK_CHECK(vkResetFences(m_logicalDevice, 1, &m_immediateFence));
+    VK_CHECK(vkResetCommandBuffer(m_immediateCommandBuffer, 0));
+	VkCommandBufferBeginInfo cmdBeginInfo = commandBufferBeginInfo(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT); // This buffer will be submitted only once
+	VK_CHECK(vkBeginCommandBuffer(m_immediateCommandBuffer, &cmdBeginInfo));
+    vkCmdCopyBuffer(m_immediateCommandBuffer, m_pointsStagingBuffer.buffer, m_pointsBuffer.buffer, 1, &stagingCopy);
+    VK_CHECK(vkEndCommandBuffer(m_immediateCommandBuffer));
+    VkCommandBufferSubmitInfo cmdinfo   = commandBufferSubmitInfo(m_immediateCommandBuffer);	
+	VkSubmitInfo2 submit                = submitInfo(&cmdinfo, nullptr, nullptr);	
+    VK_CHECK(vkQueueSubmit2(m_graphicsQueue, 1, &submit, m_immediateFence));
+    VK_CHECK(vkWaitForFences(m_logicalDevice, 1, &m_immediateFence, true, vkIo::TRANSFER_TIMEOUT_NS));
+
+    // Register created resources with global destruction queue
+    m_globalResourceDeletor.pushFunction([&]() {
+		vmaDestroyBuffer(m_vmaAllocator, m_pointsBuffer.buffer, m_pointsBuffer.allocation);
+        vmaDestroyBuffer(m_vmaAllocator, m_pointsStagingBuffer.buffer, m_pointsStagingBuffer.allocation);
+	});
+}
+
 void vkEngine::VulkanEngine::initDescriptors() {
-	// Create a descriptor pool that will hold 10 sets with 1 image each
-	std::vector<DescriptorAllocator::PoolSizeRatio> sizes = {{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 }};
-	m_globalDescriptorAllocator.initPool(m_logicalDevice, 10, sizes);
+	// Create a descriptor pool that will hold 1 set with 2 images and 1 buffer each
+	std::vector<DescriptorAllocator::PoolSizeRatio> sizes = {
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  2},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
+	m_globalDescriptorAllocator.initPool(m_logicalDevice, 1, sizes);
 
-	// Make the descriptor set layout for our compute draw
+	// Define the bindings of the descriptor set used by our compute shaders
 	DescriptorLayoutBuilder builder;
-    builder.addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-    m_drawImageDescriptorLayout = builder.build(m_logicalDevice, VK_SHADER_STAGE_COMPUTE_BIT);
+    builder.addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    builder.addBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    builder.addBinding(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    m_pointRenderDataDescriptorLayout = builder.build(m_logicalDevice, VK_SHADER_STAGE_COMPUTE_BIT);
 
-    // Allocate a descriptor set for our draw image
-	m_drawImageDescriptors = m_globalDescriptorAllocator.allocate(m_logicalDevice, m_drawImageDescriptorLayout);	
-	VkDescriptorImageInfo imgInfo = {};
-	imgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-	imgInfo.imageView   = m_drawImage.imageView;
-	VkWriteDescriptorSet drawImageWrite = {};
-	drawImageWrite.sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	drawImageWrite.pNext            = nullptr;
-	drawImageWrite.dstBinding       = 0;
-	drawImageWrite.dstSet           = m_drawImageDescriptors;
-	drawImageWrite.descriptorCount  = 1;
-	drawImageWrite.descriptorType   = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-	drawImageWrite.pImageInfo       = &imgInfo;
-	vkUpdateDescriptorSets(m_logicalDevice, 1, &drawImageWrite, 0, nullptr);
+    // Connect our descriptor set bindings to our point buffer and two draw images
+    // Common
+	m_pointRenderDataDescriptors = m_globalDescriptorAllocator.allocate(m_logicalDevice, m_pointRenderDataDescriptorLayout);	
+	// Point buffer
+    VkDescriptorBufferInfo bufferInfo = {};
+    bufferInfo.buffer   = m_pointsBuffer.buffer;
+    bufferInfo.offset   = 0;
+    bufferInfo.range    = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet pointBufferWrite = {};
+    pointBufferWrite.sType              = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	pointBufferWrite.pNext              = nullptr;
+	pointBufferWrite.dstBinding         = 0;
+	pointBufferWrite.dstSet             = m_pointRenderDataDescriptors;
+	pointBufferWrite.descriptorCount    = 1;
+	pointBufferWrite.descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	pointBufferWrite.pBufferInfo        = &bufferInfo;
+	vkUpdateDescriptorSets(m_logicalDevice, 1, &pointBufferWrite, 0, nullptr);
+    // Packed data image
+    VkDescriptorImageInfo packedDataImgInfo = {};
+	packedDataImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+	packedDataImgInfo.imageView   = m_packedDataImage.imageView;
+	VkWriteDescriptorSet packedDataImageWrite = {};
+	packedDataImageWrite.sType              = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	packedDataImageWrite.pNext              = nullptr;
+	packedDataImageWrite.dstBinding         = 1;
+	packedDataImageWrite.dstSet             = m_pointRenderDataDescriptors;
+	packedDataImageWrite.descriptorCount    = 1;
+	packedDataImageWrite.descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	packedDataImageWrite.pImageInfo         = &packedDataImgInfo;
+	vkUpdateDescriptorSets(m_logicalDevice, 1, &packedDataImageWrite, 0, nullptr);
+    // Resolved render image
+    VkDescriptorImageInfo resolvedRenderImgInfo = {};
+	resolvedRenderImgInfo.imageLayout   = VK_IMAGE_LAYOUT_GENERAL;
+	resolvedRenderImgInfo.imageView     = m_resolvedRenderImage.imageView;
+	VkWriteDescriptorSet resolvedRenderImageWrite = {};
+	resolvedRenderImageWrite.sType              = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	resolvedRenderImageWrite.pNext              = nullptr;
+	resolvedRenderImageWrite.dstBinding         = 2;
+	resolvedRenderImageWrite.dstSet             = m_pointRenderDataDescriptors;
+	resolvedRenderImageWrite.descriptorCount    = 1;
+	resolvedRenderImageWrite.descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	resolvedRenderImageWrite.pImageInfo         = &resolvedRenderImgInfo;
+	vkUpdateDescriptorSets(m_logicalDevice, 1, &resolvedRenderImageWrite, 0, nullptr);
 
 	// Register the global descriptor allocator and created descriptor layout with global destruction queue 
 	m_globalResourceDeletor.pushFunction([&]() {
 		m_globalDescriptorAllocator.destroyPool(m_logicalDevice);
-		vkDestroyDescriptorSetLayout(m_logicalDevice, m_drawImageDescriptorLayout, nullptr);
+		vkDestroyDescriptorSetLayout(m_logicalDevice, m_pointRenderDataDescriptorLayout, nullptr);
 	});
 }
 
@@ -293,7 +410,7 @@ void vkEngine::VulkanEngine::initPipelines() {
     VkPipelineLayoutCreateInfo computeLayout = {};
 	computeLayout.sType             = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 	computeLayout.pNext             = nullptr;
-	computeLayout.pSetLayouts       = &m_drawImageDescriptorLayout;
+	computeLayout.pSetLayouts       = &m_pointRenderDataDescriptorLayout;
 	computeLayout.setLayoutCount    = 1;
     // Define structure of push constants
     VkPushConstantRange pushConstant = {};
@@ -304,21 +421,16 @@ void vkEngine::VulkanEngine::initPipelines() {
     computeLayout.pushConstantRangeCount    = 1;
 	VK_CHECK(vkCreatePipelineLayout(m_logicalDevice, &computeLayout, nullptr, &m_computePipelineLayoutCommon));
 
-    // Load shader code for our background compute effects
-    VkShaderModule gradientShader;
-    std::filesystem::path gradientShaderPath = vkCommon::constants::SHADERS_DIR_PATH / "gradient.comp.spv";
-	if (!vkEngine::loadShaderModule(gradientShaderPath.string().c_str(), m_logicalDevice, &gradientShader)) {
-		throw std::runtime_error("Error loading gradient compute shader");
+    // Load shader code
+    VkShaderModule rasterizePointsShader;
+    std::filesystem::path rasterizePointsShaderPath = vkCommon::constants::SHADERS_DIR_PATH / "rasterize_points.comp.spv";
+	if (!vkEngine::loadShaderModule(rasterizePointsShaderPath.string().c_str(), m_logicalDevice, &rasterizePointsShader)) {
+		throw std::runtime_error("Error loading point rasterization compute shader");
 	}
-    VkShaderModule gradientColorShader;
-    std::filesystem::path gradientColorShaderPath = vkCommon::constants::SHADERS_DIR_PATH / "gradient_color.comp.spv";
-	if (!vkEngine::loadShaderModule(gradientColorShaderPath.string().c_str(), m_logicalDevice, &gradientColorShader)) {
-		throw std::runtime_error("Error loading gradient color compute shader");
-	}
-    VkShaderModule skyShader;
-    std::filesystem::path skyShaderPath = vkCommon::constants::SHADERS_DIR_PATH / "sky.comp.spv";
-	if (!vkEngine::loadShaderModule(skyShaderPath.string().c_str(), m_logicalDevice, &skyShader)) {
-		throw std::runtime_error("Error loading sky compute shader");
+    VkShaderModule resolveRenderShader;
+    std::filesystem::path resolveRenderShaderPath = vkCommon::constants::SHADERS_DIR_PATH / "resolve_render.comp.spv";
+	if (!vkEngine::loadShaderModule(resolveRenderShaderPath.string().c_str(), m_logicalDevice, &resolveRenderShader)) {
+		throw std::runtime_error("Error loading render resolve compute shader");
 	}
 
     // Compute pipeline has only a single stage. We create it here and specify the shader to be used on a per effect basis 
@@ -336,46 +448,21 @@ void vkEngine::VulkanEngine::initPipelines() {
 	computePipelineCreateInfo.stage     = stageinfo;
 
     // Create our pipelines and associated data (name and push constant data)
-    // Gradient
-    computePipelineCreateInfo.stage.module = gradientShader;
-    vkCommon::ComputeEffect gradient = {};
-    gradient.layout     = m_computePipelineLayoutCommon;
-    gradient.name       = "Gradient";
-    gradient.data       = {};
-    VK_CHECK(vkCreateComputePipelines(m_logicalDevice, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &gradient.pipeline));
-    // Gradient color
-    computePipelineCreateInfo.stage.module = gradientColorShader;
-    vkCommon::ComputeEffect gradientColor = {};
-    gradientColor.layout        = m_computePipelineLayoutCommon;
-    gradientColor.name          = "Gradient Color";
-    gradientColor.data          = {};
-    gradientColor.data.data1    = glm::vec4(1, 0, 0, 1);
-    gradientColor.data.data2    = glm::vec4(0, 0, 1, 1);
-    VK_CHECK(vkCreateComputePipelines(m_logicalDevice, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &gradientColor.pipeline));
-    // Sky
-    computePipelineCreateInfo.stage.module = skyShader;
-    vkCommon::ComputeEffect sky = {};
-    sky.layout      = m_computePipelineLayoutCommon;
-    sky.name        = "Sky";
-    sky.data        = {};
-    sky.data.data1  = glm::vec4(0.1, 0.2, 0.4, 0.97);
-    VK_CHECK(vkCreateComputePipelines(m_logicalDevice, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &sky.pipeline));
-    
-    // Register effects with compute effects list and update config accordingly
-    m_config.backgroundEffects.push_back(gradient);
-    m_config.backgroundEffects.push_back(gradientColor);
-    m_config.backgroundEffects.push_back(sky);
+    // Point rasterization
+    computePipelineCreateInfo.stage.module = rasterizePointsShader;
+    VK_CHECK(vkCreateComputePipelines(m_logicalDevice, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &m_rasterizePoints));
+    // Render resolve
+    computePipelineCreateInfo.stage.module = resolveRenderShader;
+    VK_CHECK(vkCreateComputePipelines(m_logicalDevice, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &m_resolveRender));
 
     // Destroy the loaded shaders (as they have already been embedded in their respective pipelines)
     // and register the created pipelines and their layouts with the global destruction queue
-    vkDestroyShaderModule(m_logicalDevice, gradientShader, nullptr);
-    vkDestroyShaderModule(m_logicalDevice, gradientColorShader, nullptr);
-    vkDestroyShaderModule(m_logicalDevice, skyShader, nullptr);
+    vkDestroyShaderModule(m_logicalDevice, rasterizePointsShader, nullptr);
+    vkDestroyShaderModule(m_logicalDevice, resolveRenderShader, nullptr);
 	m_globalResourceDeletor.pushFunction([=]() {
 		vkDestroyPipelineLayout(m_logicalDevice, m_computePipelineLayoutCommon, nullptr);
-		vkDestroyPipeline(m_logicalDevice, gradient.pipeline, nullptr);
-        vkDestroyPipeline(m_logicalDevice, gradientColor.pipeline, nullptr);
-        vkDestroyPipeline(m_logicalDevice, sky.pipeline, nullptr);
+		vkDestroyPipeline(m_logicalDevice, m_rasterizePoints, nullptr);
+        vkDestroyPipeline(m_logicalDevice, m_resolveRender, nullptr);
     });
 }
 
@@ -504,8 +591,8 @@ void vkEngine::VulkanEngine::draw() {
                                    currentFrameSynchronizationPrimitives.swapchainToRender, nullptr, &swapchainImageIndex));
 
     // Define drawing surface extent
-    m_drawExtent.width  = m_drawImage.imageExtent.width;
-	m_drawExtent.height = m_drawImage.imageExtent.height;
+    m_drawExtent.width  = m_packedDataImage.imageExtent.width;
+	m_drawExtent.height = m_packedDataImage.imageExtent.height;
 
     // Begin graphics command buffer recording
     VK_CHECK(vkResetCommandBuffer(graphicsCmdBuff, 0));
@@ -513,25 +600,26 @@ void vkEngine::VulkanEngine::draw() {
 	VK_CHECK(vkBeginCommandBuffer(graphicsCmdBuff, &cmdBeginInfo));	
 
     // Main draw
-	// Transition main draw image into general layout and draw a gradient to it
-	transitionImage(graphicsCmdBuff, m_drawImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-    // Draw a fullscreen clear or compute effect depending on user selection
-    switch (m_config.currentDraw) {
-        case vkCommon::DrawType::CLEAR:     { drawClear(graphicsCmdBuff); } break;
-        case vkCommon::DrawType::COMPUTE:   { drawComputeBackgroundEffect(graphicsCmdBuff); } break; // TODO: Use dedicated compute queue
-        default:                            { throw std::runtime_error("Attempted to draw unsupported draw type"); }
-    }
-	// Transition the draw image and the swapchain image into transfer layouts
-	transitionImage(graphicsCmdBuff, m_drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-	transitionImage(graphicsCmdBuff, m_swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	// Execute a copy from the draw image to the swapchain image
-	copyImageToImage(graphicsCmdBuff, m_drawImage.image, m_swapchainImages[swapchainImageIndex], m_drawExtent, m_swapchainExtent);
-    // Transition the swapchain image to Draw Optimal so it can be rendered to by ImGUI
-    vkEngine::transitionImage(graphicsCmdBuff, m_swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    // Draw ImGUI to the swapchain image
-	drawImgui(graphicsCmdBuff,  m_swapchainImageViews[swapchainImageIndex]);
-	// Set swapchain image layout to Present so we can show it on the screen
-	vkEngine::transitionImage(graphicsCmdBuff, m_swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    // TODO: Implement
+	// // Transition main draw image into general layout and draw a gradient to it
+	// transitionImage(graphicsCmdBuff, m_packedDataImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    // // Draw a fullscreen clear or compute effect depending on user selection
+    // switch (m_config.currentDraw) {
+    //     case vkCommon::DrawType::CLEAR:     { drawPointColorUnpack(graphicsCmdBuff); } break;
+    //     case vkCommon::DrawType::COMPUTE:   { drawPointRasterizer(graphicsCmdBuff); } break; // TODO: Use dedicated compute queue
+    //     default:                            { throw std::runtime_error("Attempted to draw unsupported draw type"); }
+    // }
+	// // Transition the draw image and the swapchain image into transfer layouts
+	// transitionImage(graphicsCmdBuff, m_packedDataImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	// transitionImage(graphicsCmdBuff, m_swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	// // Execute a copy from the draw image to the swapchain image
+	// copyImageToImage(graphicsCmdBuff, m_packedDataImage.image, m_swapchainImages[swapchainImageIndex], m_drawExtent, m_swapchainExtent);
+    // // Transition the swapchain image to Draw Optimal so it can be rendered to by ImGUI
+    // vkEngine::transitionImage(graphicsCmdBuff, m_swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    // // Draw ImGUI to the swapchain image
+	// drawImgui(graphicsCmdBuff,  m_swapchainImageViews[swapchainImageIndex]);
+	// // Set swapchain image layout to Present so we can show it on the screen
+	// vkEngine::transitionImage(graphicsCmdBuff, m_swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
 	// Finalize the command buffer
 	VK_CHECK(vkEndCommandBuffer(graphicsCmdBuff));
@@ -563,26 +651,19 @@ void vkEngine::VulkanEngine::draw() {
     m_frameNumber++;
 }
 
-void vkEngine::VulkanEngine::drawClear(VkCommandBuffer graphicsCmdBuff) {
-    VkClearColorValue clearValue;
-	float flash                     = std::abs(std::sin(m_frameNumber / 144.0f));   // Flash with 144fps period
-    glm::vec4 flashAdjustedColor    = flash * m_config.clearColor;                  // Flash user-selected color
-	clearValue                      = { { flashAdjustedColor.r,
-                                          flashAdjustedColor.g,
-                                          flashAdjustedColor.b,
-                                          flashAdjustedColor.a } };
-	VkImageSubresourceRange clearRange = imageSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
-    vkCmdClearColorImage(graphicsCmdBuff, m_drawImage.image, VK_IMAGE_LAYOUT_GENERAL, &clearValue, 1, &clearRange);
+void vkEngine::VulkanEngine::drawPointRasterizer(VkCommandBuffer computeCmdBuff) {
+    // TODO: Implement
+    // vkCommon::ComputeEffect selectedEffect = m_config.backgroundEffects[m_config.selectedEffect];
+    // vkCmdBindPipeline(computeCmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, selectedEffect.pipeline);
+	// vkCmdBindDescriptorSets(computeCmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, selectedEffect.layout, 0, 1, &m_pointRenderDataDescriptors, 0, nullptr);
+    // vkCmdPushConstants(computeCmdBuff, selectedEffect.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vkCommon::ComputePushConstants), &selectedEffect.data);
+    // vkCmdDispatch(computeCmdBuff,
+    //               static_cast<uint32_t>(std::ceil(m_drawExtent.width / 16.0)),
+    //               static_cast<uint32_t>(std::ceil(m_drawExtent.height / 16.0)), 1);
 }
 
-void vkEngine::VulkanEngine::drawComputeBackgroundEffect(VkCommandBuffer computeCmdBuff) {
-    vkCommon::ComputeEffect selectedEffect = m_config.backgroundEffects[m_config.selectedEffect];
-    vkCmdBindPipeline(computeCmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, selectedEffect.pipeline);
-	vkCmdBindDescriptorSets(computeCmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, selectedEffect.layout, 0, 1, &m_drawImageDescriptors, 0, nullptr);
-    vkCmdPushConstants(computeCmdBuff, selectedEffect.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vkCommon::ComputePushConstants), &selectedEffect.data);
-    vkCmdDispatch(computeCmdBuff,
-                  static_cast<uint32_t>(std::ceil(m_drawExtent.width / 16.0)),
-                  static_cast<uint32_t>(std::ceil(m_drawExtent.height / 16.0)), 1);
+void vkEngine::VulkanEngine::drawPointColorUnpack(VkCommandBuffer graphicsCmdBuff) {
+    // TODO: Implement
 }
 
 void vkEngine::VulkanEngine::drawImgui(VkCommandBuffer graphicsCmdBuff, VkImageView targetImageView) {
