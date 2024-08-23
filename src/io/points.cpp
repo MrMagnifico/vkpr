@@ -24,10 +24,10 @@ void vkIo::readPointCloud(const char* path, std::vector<Point>& pointcloud, glm:
         ss << line;
         if (ss >> lineStart && lineStart == 'v') {
             if (!(ss >> point.position.x >> point.position.y >> point.position.z)) { continue; }
-            if (!(ss >> point.color.x >> point.color.y >> point.color.z)) { point.color = glm::vec3(0.5f, 0.5f, 0.5f); }
+            if (!(ss >> point.color.x >> point.color.y >> point.color.z)) { point.color = glm::vec4(0.5f, 0.5f, 0.5f, 1.0f); }
             pointcloud.push_back(point);
-            minimum = glm::min(point.position, minimum);
-            maximum = glm::max(point.position, maximum);
+            minimum = glm::min(glm::vec3(point.position), minimum);
+            maximum = glm::max(glm::vec3(point.position), maximum);
         }
     }
     std::cout << "Done reading!" << std::endl;

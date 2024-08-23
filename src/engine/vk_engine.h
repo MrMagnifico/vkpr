@@ -155,7 +155,9 @@ private:
 
 	// Draw commands
 	// Entry point
-	void draw(); 
+	void draw();
+	// Fill rasterization surface with maximally positive values
+	void drawClearRasterizationSurface(VkCommandBuffer graphicsCmdBuff);
 	// Rasterize point clouds to packed custom data image
 	void drawPointRasterizer(VkCommandBuffer computeCmdBuff);
 	// Unpack the custom point depth and color data format to intermediate image

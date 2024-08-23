@@ -6,8 +6,8 @@ namespace vkIo {
 constexpr uint64_t TRANSFER_TIMEOUT_NS	= 1000000000; // 1000ms
 
 struct Point {
-    alignas(16) glm::vec3 position;
-    alignas(16) glm::vec3 color;
+    glm::vec4 position  = {0.0f, 0.0f, 0.0f, 1.0f};
+    glm::vec4 color     = {0.0f, 0.0f, 0.0f, 1.0f};
 };
 
 /**

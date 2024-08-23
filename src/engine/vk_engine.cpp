@@ -201,7 +201,7 @@ void vkEngine::VulkanEngine::initSwapchainAndDrawSurfaces() {
     // Packed data image
     m_packedDataImage.imageFormat = VK_FORMAT_R64_SINT;
 	m_packedDataImage.imageExtent = drawImageExtent;
-	VkImageUsageFlags packedDataImageUsages = VK_IMAGE_USAGE_STORAGE_BIT;
+	VkImageUsageFlags packedDataImageUsages = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
 	VkImageCreateInfo packedDataInfo = imageCreateInfo(m_packedDataImage.imageFormat, packedDataImageUsages, drawImageExtent);
     vmaCreateImage(m_vmaAllocator, &packedDataInfo, &imageAllocationCreateInfo, &m_packedDataImage.image, &m_packedDataImage.allocation, nullptr);
     VkImageViewCreateInfo packedDataViewInfo = imageViewCreateInfo(m_packedDataImage.imageFormat, m_packedDataImage.image, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -602,10 +602,14 @@ void vkEngine::VulkanEngine::draw() {
 
     // Main draw
     // TODO: Use more efficient barrier because transitionImage waits on EVERYTHING
+    // Clear packed data image with maximum positive signed integer value
+    transitionImage(graphicsCmdBuff, m_packedDataImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    drawClearRasterizationSurface(graphicsCmdBuff);
 	// Draw points to packed data image
-    transitionImage(graphicsCmdBuff, m_packedDataImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    transitionImage(graphicsCmdBuff, m_packedDataImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
     drawPointRasterizer(graphicsCmdBuff);
     // Resolve packed data to colored image
+    transitionImage(graphicsCmdBuff, m_packedDataImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
     transitionImage(graphicsCmdBuff, m_resolvedRenderImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     drawPointColorUnpack(graphicsCmdBuff);
 	// Transition the draw image and the swapchain image into transfer layouts
@@ -650,6 +654,14 @@ void vkEngine::VulkanEngine::draw() {
     m_frameNumber++;
 }
 
+void vkEngine::VulkanEngine::drawClearRasterizationSurface(VkCommandBuffer graphicsCmdBuff) {
+    VkClearColorValue clearValue = {};
+    clearValue.int32[1] = 0x7FFFFFFF;
+	clearValue.int32[0] = 0xFFFFFFFF;
+	VkImageSubresourceRange clearRange  = imageSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
+    vkCmdClearColorImage(graphicsCmdBuff, m_packedDataImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearValue, 1, &clearRange);
+}
+
 void vkEngine::VulkanEngine::drawPointRasterizer(VkCommandBuffer computeCmdBuff) {
     vkCommon::ComputePushConstants pushConstants = preparePushConstants();
     vkCmdBindPipeline(computeCmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, m_rasterizePoints);
@@ -664,8 +676,8 @@ void vkEngine::VulkanEngine::drawPointColorUnpack(VkCommandBuffer computeCmdBuff
 	vkCmdBindDescriptorSets(computeCmdBuff, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipelineLayoutCommon, 0, 1, &m_pointRenderDataDescriptors, 0, nullptr);
     vkCmdPushConstants(computeCmdBuff, m_computePipelineLayoutCommon, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vkCommon::ComputePushConstants), &pushConstants);
     vkCmdDispatch(computeCmdBuff,
-                  static_cast<uint32_t>(std::ceil(m_windowExtent.width / 16.0)),
-                  static_cast<uint32_t>(std::ceil(m_windowExtent.height / 16.0)),
+                  static_cast<uint32_t>(std::ceil(m_windowExtent.width / 8.0)),
+                  static_cast<uint32_t>(std::ceil(m_windowExtent.height / 8.0)),
                   1);
 }
 

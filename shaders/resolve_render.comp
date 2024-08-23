@@ -18,9 +18,9 @@ float mapRange(float value, float domainMin, float domainMax, float rangeMin, fl
 // Unpack a 64-bit int containing 8-bit color data in 0BGR format to an RGB vector with range [0..1]
 vec3 unpack8bpc(int64_t rgb) {
 	vec3 result;
-    result.r    = mapRange(float(rgb & 0xFF),       0.0f, 255.0f, 0.0f, 1.0f);
-    result.g    = mapRange(float(rgb & 0xFF00),     0.0f, 255.0f, 0.0f, 1.0f);
-    result.b    = mapRange(float(rgb & 0xFF0000),   0.0f, 255.0f, 0.0f, 1.0f);   
+    result.r    = mapRange(float((rgb & 0xFF)),             0.0f, 255.0f, 0.0f, 1.0f);
+    result.g    = mapRange(float((rgb & 0xFF00) >> 8),      0.0f, 255.0f, 0.0f, 1.0f);
+    result.b    = mapRange(float((rgb & 0xFF0000) >> 16),   0.0f, 255.0f, 0.0f, 1.0f);   
 	return result;
 }
 

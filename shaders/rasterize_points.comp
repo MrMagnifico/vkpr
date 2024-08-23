@@ -7,8 +7,8 @@
 layout(local_size_x = 64) in;
 
 struct Point {
-	vec3 position;
-	vec3 color;
+	vec4 position;
+	vec4 color;
 };
 
 // Descriptor set resources
@@ -28,9 +28,9 @@ float mapRange(float value, float domainMin, float domainMax, float rangeMin, fl
 
 // Compress a vec3 with colors in range [0..1] to 8-bit 0BGR
 uint compress8bpc(vec3 rgb) {
-	uint result;
+	uint result = 0;
 	rgb     = clamp(rgb, 0, 1);
-	result  = uint(rgb.r * 255.0f);
+	result |= uint(rgb.r * 255.0f);
 	result |= uint(rgb.g * 255.0f) << 8;
 	result |= uint(rgb.b * 255.0f) << 16;
 	return result;
@@ -43,22 +43,21 @@ void main() {
     
     // Fetch point and obtain screen-space position in NDC
     Point point         = pointcloud.data[threadGlobalId];
-    vec4 pointPos       = vec4(point.position, 1.0f);
-    vec4 projectedPos   = pushConstants.mvp * pointPos;
+    vec4 projectedPos   = pushConstants.mvp * point.position;
 
     // Compute linear depth and screen-space pixel coordinates
     ivec2 surfaceSize   = imageSize(rasterSurface);
-    int64_t linearDepth = floatBitsToInt(projectedPos.w);
+    int linearDepth     = floatBitsToInt(projectedPos.w);
     vec2 ndcCoords      = projectedPos.xy / projectedPos.w;
     ivec2 pixelCoords   = ivec2(mapRange(ndcCoords.x, -1.0f, 1.0f, 0, surfaceSize.x - 1),
                                 mapRange(ndcCoords.y, -1.0f, 1.0f, 0, surfaceSize.y - 1));
 
     // Exit if screen-space pixel coordinates are out of bounds
-    // TODO: Might need to add check for 0
-    if (pixelCoords.x > surfaceSize.x - 1 || pixelCoords.y > surfaceSize.y - 1) { return; }
+    if (pixelCoords.x < 0                 || pixelCoords.y < 0 ||
+        pixelCoords.x > surfaceSize.x - 1 || pixelCoords.y > surfaceSize.y - 1) { return; }
 
     // Encode depth and color info into a single 64-bit int and carry out atomicMin
-    int64_t compressedColor = compress8bpc(point.color);
+    uint compressedColor    = compress8bpc(point.color.rgb);
     int64_t packedPoint     = (linearDepth << 24) | compressedColor;
     imageAtomicMin(rasterSurface, pixelCoords, packedPoint);
 }
