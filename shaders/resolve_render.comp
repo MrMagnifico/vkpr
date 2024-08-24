@@ -1,0 +1,38 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_atomic_int64 : require
+#extension GL_EXT_shader_image_int64 : require
+
+// Shader work group layout
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// Descriptor set resources
+layout(set = 0, binding = 1, r64i)      uniform restrict readonly i64image2D rasterSurface;
+layout(set = 0, binding = 2, rgba16f)   uniform restrict writeonly image2D renderSurface; // TODO: Change to straight UINT to prevent needless float conversion
+
+float mapRange(float value, float domainMin, float domainMax, float rangeMin, float rangeMax) {
+	float percentage = (value - domainMin) / (domainMax - domainMin);   // Calculate the percentage of the value within the input range
+	return rangeMin + percentage * (rangeMax - rangeMin);           	// Map the percentage to the output range
+}
+
+// Unpack a 64-bit int containing 8-bit color data in 0BGR format to an RGB vector with range [0..1]
+vec3 unpack8bpc(int64_t rgb) {
+	vec3 result;
+    result.r    = mapRange(float((rgb & 0xFF)),             0.0f, 255.0f, 0.0f, 1.0f);
+    result.g    = mapRange(float((rgb & 0xFF00) >> 8),      0.0f, 255.0f, 0.0f, 1.0f);
+    result.b    = mapRange(float((rgb & 0xFF0000) >> 16),   0.0f, 255.0f, 0.0f, 1.0f);   
+	return result;
+}
+
+void main() {
+    // Get thread ID and exit if it is out of bounds
+    ivec2 surfaceSize       = imageSize(rasterSurface);
+    uvec2 threadGlobalId    = gl_GlobalInvocationID.xy;
+	if (threadGlobalId.x > surfaceSize.x - 1 || threadGlobalId.y > surfaceSize.y - 1) { return; }
+    
+    // Get packed 64-bit depth+color, unpack color component, and store it in the render image
+    ivec2 imageCoords   = ivec2(threadGlobalId);
+    int64_t packedColor = imageLoad(rasterSurface, imageCoords).r;
+    vec3 unpackedColor  = unpack8bpc(packedColor);
+    imageStore(renderSurface, imageCoords, vec4(unpackedColor, 1.0f));
+}

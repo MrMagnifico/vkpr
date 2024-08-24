@@ -11,7 +11,6 @@ public:
 
 private:
     vkCommon::Config& m_config;
-
-    void drawDrawControls();
+    
 };
 }

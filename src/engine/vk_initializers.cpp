@@ -203,6 +203,29 @@ VkDescriptorBufferInfo vkEngine::bufferInfo(VkBuffer buffer, VkDeviceSize offset
     return binfo;
 }
 
+VkBufferCreateInfo vkEngine::bufferConcurrentCreateInfo(VkDeviceSize size, VkBufferUsageFlags usage, std::vector<uint32_t> queueFamilyIndices,
+                                                        VkBufferCreateFlags flags) {
+    VkBufferCreateInfo binfo = {};
+    binfo.sType         = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    binfo.flags         = flags;
+    binfo.size          = size;
+    binfo.usage         = usage;
+    binfo.sharingMode   = VK_SHARING_MODE_CONCURRENT;
+    binfo.queueFamilyIndexCount = queueFamilyIndices.size();
+    binfo.pQueueFamilyIndices   = queueFamilyIndices.data();
+    return binfo;
+}
+
+VkBufferCreateInfo vkEngine::bufferExclusiveCreateInfo(VkDeviceSize size, VkBufferUsageFlags usage, VkBufferCreateFlags flags) {
+    VkBufferCreateInfo binfo = {};
+    binfo.sType                 = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    binfo.flags                 = flags;
+    binfo.size                  = size;
+    binfo.usage                 = usage;
+    binfo.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
+    return binfo;
+}
+
 VkImageCreateInfo vkEngine::imageCreateInfo(VkFormat format, VkImageUsageFlags usageFlags, VkExtent3D extent) {
     VkImageCreateInfo info = {};
     info.sType          = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -212,7 +235,7 @@ VkImageCreateInfo vkEngine::imageCreateInfo(VkFormat format, VkImageUsageFlags u
     info.extent         = extent;
     info.mipLevels      = 1;
     info.arrayLayers    = 1;
-    info.samples        = VK_SAMPLE_COUNT_1_BIT;   //For MSAA. we will not be using it by default, so default it to 1 sample per pixel.
+    info.samples        = VK_SAMPLE_COUNT_1_BIT;    // For MSAA. we will not be using it by default, so default it to 1 sample per pixel.
     info.tiling         = VK_IMAGE_TILING_OPTIMAL;  // Optimal tiling, which means the image is stored on the best GPU format
     info.usage          = usageFlags;
     return info;

@@ -19,6 +19,15 @@
 #include <VkBootstrap.h>
 
 
+template<typename T>
+struct AllocatedBuffer {
+    VkBuffer buffer;
+    VmaAllocation allocation;
+    size_t size; // Number of elements
+
+    size_t sizeBytes() { return sizeof(T) * size; }
+};
+
 struct AllocatedImage {
     VkImage image;
     VkImageView imageView;

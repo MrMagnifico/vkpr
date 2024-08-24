@@ -3,9 +3,11 @@
 #include <common/config.h>
 #include <common/vk_types.h>
 #include <engine/vk_descriptors.h>
-#include <utils/resource_management.h>
+#include <io/points.h>
 #include <ui/menu.h>
+#include <utils/resource_management.h>
 
+#include <glm/gtc/matrix_transform.hpp>
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include <SDL_vulkan.h>
@@ -55,6 +57,20 @@ private:
 	bool m_shouldRender			= {true};
 	uint32_t m_frameNumber		= {0};
 	vkCommon::Config m_config	= {};
+
+	// TODO: Replace with proper camera
+	glm::vec3 m_modelMin, m_modelMax;
+	vkCommon::ComputePushConstants preparePushConstants() {
+		vkCommon::ComputePushConstants pushConstants;
+		pushConstants.numPoints = static_cast<uint32_t>(m_pointsBuffer.size);
+		constexpr float fov	= 45.0f;
+		glm::vec3 center	= (m_modelMin + m_modelMax) * 0.5f;
+		float span 			= glm::length(m_modelMin - m_modelMax);
+		auto view 			= glm::lookAt(center + glm::vec3(-0.9f * span, 0, 0.15f * span), center, glm::vec3(0, 0, -1));
+		auto projection 	= glm::perspective(fov, ((float) m_windowExtent.width) / m_windowExtent.height, 0.1f, 2 * span);
+		pushConstants.mvp	= projection * view; // No model transformation (i.e. identity model matrix)
+		return pushConstants;
+	}
 	
 	// Window
 	VkExtent2D m_windowExtent	= {1280, 720};
@@ -89,17 +105,21 @@ private:
 	std::array<vkUtils::DeletionQueue, FRAME_OVERLAP> m_frameResourceDeletors;
 	vkUtils::DeletionQueue m_globalResourceDeletor;
 
-	// Drawing surface
-	AllocatedImage m_drawImage;
+	// Point cloud data
+	AllocatedBuffer<vkIo::Point> m_pointsBuffer, m_pointsStagingBuffer;
+
+	// Drawing surfaces
+	AllocatedImage m_packedDataImage, m_resolvedRenderImage;
 	VkExtent2D m_drawExtent;
 
 	// Descriptor sets
 	DescriptorAllocator m_globalDescriptorAllocator;
-	VkDescriptorSet m_drawImageDescriptors;
-	VkDescriptorSetLayout m_drawImageDescriptorLayout;
+	VkDescriptorSet m_pointRenderDataDescriptors;
+	VkDescriptorSetLayout m_pointRenderDataDescriptorLayout;
 
 	// Compute effect pipelines
 	VkPipelineLayout m_computePipelineLayoutCommon;
+	VkPipeline m_rasterizePoints, m_resolveRender;
 
 	// Immediate submit resources. Pool and buffer use the graphics queue
 	VkFence m_immediateFence;
@@ -111,9 +131,10 @@ private:
 
 	// Core Vulkan resource initialisation
 	void initVulkan();
-	void initSwapchainAndDrawSurface();
+	void initSwapchainAndDrawSurfaces();
 	void initCommands();
 	void initSyncStructures();
+	void initPointBuffers();
 	void initDescriptors();
 	void initPipelines();
 	void initImgui();
@@ -134,11 +155,13 @@ private:
 
 	// Draw commands
 	// Entry point
-	void draw(); 
-	// Fullscreen clear
-	void drawClear(VkCommandBuffer graphicsCmdBuff);
-	// Compute background effect draw
-	void drawComputeBackgroundEffect(VkCommandBuffer computeCmdBuff);
+	void draw();
+	// Fill rasterization surface with maximally positive values
+	void drawClearRasterizationSurface(VkCommandBuffer graphicsCmdBuff);
+	// Rasterize point clouds to packed custom data image
+	void drawPointRasterizer(VkCommandBuffer computeCmdBuff);
+	// Unpack the custom point depth and color data format to intermediate image
+	void drawPointColorUnpack(VkCommandBuffer computeCmdBuff);
 	// ImGUI UI
 	void drawImgui(VkCommandBuffer graphicsCmdBuff, VkImageView targetImageView);
 };

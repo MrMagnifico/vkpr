@@ -1,0 +1,64 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_atomic_int64 : require
+#extension GL_EXT_shader_image_int64 : require
+
+// Shader work group layout
+layout(local_size_x = 64) in;
+
+struct Point {
+	vec4 position;
+	vec4 color;
+};
+
+// Descriptor set resources
+layout(set = 0, binding = 0, std430) buffer PointCloud { Point data[]; } pointcloud;
+layout(set = 0, binding = 1, r64i) uniform restrict i64image2D rasterSurface;
+
+// Push constants block
+layout(push_constant) uniform constants {
+    uint numPoints;
+    mat4 mvp;
+} pushConstants;
+
+float mapRange(float value, float domainMin, float domainMax, float rangeMin, float rangeMax) {
+	float percentage = (value - domainMin) / (domainMax - domainMin);   // Calculate the percentage of the value within the input range
+	return rangeMin + percentage * (rangeMax - rangeMin);           	// Map the percentage to the output range
+}
+
+// Compress a vec3 with colors in range [0..1] to 8-bit 0BGR
+uint compress8bpc(vec3 rgb) {
+	uint result = 0;
+	rgb     = clamp(rgb, 0, 1);
+	result |= uint(rgb.r * 255.0f);
+	result |= uint(rgb.g * 255.0f) << 8;
+	result |= uint(rgb.b * 255.0f) << 16;
+	return result;
+}
+
+void main() {
+    // Get thread ID and exit if it is out of bounds
+    uint threadGlobalId = gl_GlobalInvocationID.x;
+	if (threadGlobalId > pushConstants.numPoints) { return; }
+    
+    // Fetch point and obtain screen-space position in NDC
+    Point point         = pointcloud.data[threadGlobalId];
+    vec4 projectedPos   = pushConstants.mvp * point.position;
+
+    // Compute linear depth and screen-space pixel coordinates
+    ivec2 surfaceSize   = imageSize(rasterSurface);
+    int linearDepth     = floatBitsToInt(projectedPos.w);
+    vec2 ndcCoords      = projectedPos.xy / projectedPos.w;
+    ivec2 pixelCoords   = ivec2(mapRange(ndcCoords.x, -1.0f, 1.0f, 0, surfaceSize.x - 1),
+                                mapRange(ndcCoords.y, -1.0f, 1.0f, 0, surfaceSize.y - 1));
+
+    // Exit if screen-space pixel coordinates are out of bounds
+    if (pixelCoords.x < 0                 || pixelCoords.y < 0 ||
+        pixelCoords.x > surfaceSize.x - 1 || pixelCoords.y > surfaceSize.y - 1) { return; }
+
+    // Encode depth and color info into a single 64-bit int and carry out atomicMin
+    uint compressedColor    = compress8bpc(point.color.rgb);
+    int64_t packedPoint     = (linearDepth << 24) | compressedColor;
+    imageAtomicMin(rasterSurface, pixelCoords, packedPoint);
+}
+
