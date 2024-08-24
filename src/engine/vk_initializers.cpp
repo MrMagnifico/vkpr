@@ -211,7 +211,7 @@ VkBufferCreateInfo vkEngine::bufferConcurrentCreateInfo(VkDeviceSize size, VkBuf
     binfo.size          = size;
     binfo.usage         = usage;
     binfo.sharingMode   = VK_SHARING_MODE_CONCURRENT;
-    binfo.queueFamilyIndexCount = queueFamilyIndices.size();
+    binfo.queueFamilyIndexCount = static_cast<uint32_t>(queueFamilyIndices.size());
     binfo.pQueueFamilyIndices   = queueFamilyIndices.data();
     return binfo;
 }

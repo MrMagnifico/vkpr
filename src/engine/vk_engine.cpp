@@ -290,9 +290,8 @@ void vkEngine::VulkanEngine::initSyncStructures() {
 void vkEngine::VulkanEngine::initPointBuffers() {
     // TODO: Make point cloud file selectable via GUI and abstract this away
     // Load point cloud data
-    const std::filesystem::path dataFilePath = vkCommon::constants::RESOURCES_DIR_PATH / "griffin.obj";
-    std::vector<vkIo::Point> pointData;
-    vkIo::readPointCloud(dataFilePath.string().c_str(), pointData, m_modelMin, m_modelMax);
+    const std::filesystem::path dataFilePath    = vkCommon::constants::RESOURCES_DIR_PATH / "flowers.obj";
+    std::vector<vkIo::Point> pointData          = vkIo::readPointCloud(dataFilePath.string(), m_modelMin, m_modelMax);
 
     // Init buffers
     // Common
