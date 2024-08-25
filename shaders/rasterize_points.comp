@@ -56,9 +56,12 @@ void main() {
     if (pixelCoords.x < 0                 || pixelCoords.y < 0 ||
         pixelCoords.x > surfaceSize.x - 1 || pixelCoords.y > surfaceSize.y - 1) { return; }
 
-    // Encode depth and color info into a single 64-bit int and carry out atomicMin
+    // Encode depth and color info into a single 64-bit int
     uint compressedColor    = compress8bpc(point.color.rgb);
     int64_t packedPoint     = (linearDepth << 24) | compressedColor;
-    imageAtomicMin(rasterSurface, pixelCoords, packedPoint);
+
+    // Early depth test followed by atomic min if successful
+    int64_t oldPoint = imageLoad(rasterSurface, pixelCoords).r;
+    if (packedPoint < oldPoint) { imageAtomicMin(rasterSurface, pixelCoords, packedPoint); }
 }
 
