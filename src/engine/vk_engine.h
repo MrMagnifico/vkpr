@@ -8,6 +8,7 @@
 #include <utils/resource_management.h>
 
 #include <glm/gtc/matrix_transform.hpp>
+#include <nfd.h>
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include <SDL_vulkan.h>
@@ -75,6 +76,7 @@ private:
 	// Window
 	VkExtent2D m_windowExtent	= {1280, 720};
 	SDL_Window* m_window		= {nullptr};
+	nfdwindowhandle_t m_nfdSdlWindowHandle;
 
 	// Core Vulkan resources
 	VkInstance m_instance;
@@ -152,6 +154,11 @@ private:
 
 	// Immediate submmission
 	void immediateSubmit(std::function<void(VkCommandBuffer cmd)>&& commandRegistration);
+
+	// Point buffer management
+	void createPointBuffer();
+	void reloadPointData();
+	void updateDescriptorPointBuffer();
 
 	// Draw commands
 	// Entry point

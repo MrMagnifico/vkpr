@@ -9,7 +9,6 @@ add_executable(vkpr
 
   "io/points.cpp"
   
-  "ui/camera.cpp"
   "ui/menu.cpp"
 
   "utils/resource_management.cpp"
@@ -21,7 +20,8 @@ set_property(TARGET vkpr PROPERTY CXX_STANDARD 20)
 target_compile_definitions(vkpr PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_include_directories(vkpr PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
-target_link_libraries(vkpr PUBLIC vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2::SDL2 vkbootstrap imgui fastgltf::fastgltf magic_enum tinyobjloader)
+target_link_libraries(vkpr PUBLIC vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2::SDL2 vkbootstrap imgui fastgltf::fastgltf
+                      magic_enum tinyobjloader nfd)
 
 target_precompile_headers(vkpr PUBLIC <optional> <vector> <memory> <string> <vector> <unordered_map> <glm/mat4x4.hpp>  <glm/vec4.hpp> <vulkan/vulkan.h>)
 
