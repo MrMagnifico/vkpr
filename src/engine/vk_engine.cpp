@@ -13,6 +13,7 @@
 #include <imgui.h>
 #include <imgui_impl_sdl2.h>
 #include <imgui_impl_vulkan.h>
+#include <nfd_sdl2.h>
 #define VMA_IMPLEMENTATION
 #include <vk_mem_alloc.h>
 
@@ -27,14 +28,19 @@ vkEngine::VulkanEngine& vkEngine::VulkanEngine::getInstance() {
 }
 
 vkEngine::VulkanEngine::VulkanEngine()
-: m_menu(m_config) {
+: m_menu(m_config, m_nfdSdlWindowHandle)
+, m_objectControls(m_config) {
     // Initialize SDL and create a window with it
-    SDL_Init(SDL_INIT_VIDEO);
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) { throw std::runtime_error("Could not initialise SDL"); }
     SDL_WindowFlags window_flags = SDL_WINDOW_VULKAN;
     m_window = SDL_CreateWindow("vkpr",
                                 SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
                                 m_windowExtent.width, m_windowExtent.height,
                                 window_flags);
+    
+    // Initialise Native File Dialogue extended with this application's SDL window as the parent window
+    if (NFD_Init() != NFD_OKAY) { throw std::runtime_error("Could not initialise NFDe"); };
+    NFD_GetNativeWindowFromSDLWindow(m_window, &m_nfdSdlWindowHandle);
 
     // Initialize Vulkan resources
     initVulkan();
@@ -288,56 +294,10 @@ void vkEngine::VulkanEngine::initSyncStructures() {
 }
 
 void vkEngine::VulkanEngine::initPointBuffers() {
-    // TODO: Make point cloud file selectable via GUI and abstract this away
-    // Load point cloud data
-    const std::filesystem::path dataFilePath = vkCommon::constants::RESOURCES_DIR_PATH / "griffin.obj";
-    std::vector<vkIo::Point> pointData;
-    vkIo::readPointCloud(dataFilePath.string().c_str(), pointData, m_modelMin, m_modelMax);
-
-    // Init buffers
-    // Common
-    m_pointsBuffer.size = m_pointsStagingBuffer.size = pointData.size();
-    // Device buffer
-    VkBufferCreateInfo devBuffCreateInfo = vkEngine::bufferExclusiveCreateInfo(m_pointsBuffer.sizeBytes(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-    VmaAllocationCreateInfo devBuffAllocCreateInfo = {};
-	devBuffAllocCreateInfo.usage            = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-	devBuffAllocCreateInfo.requiredFlags    = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    vmaCreateBuffer(m_vmaAllocator, &devBuffCreateInfo, &devBuffAllocCreateInfo, &m_pointsBuffer.buffer, &m_pointsBuffer.allocation, nullptr);
-    // Host/Staging buffer
-    VkBufferCreateInfo stagingBuffCreateInfo = vkEngine::bufferExclusiveCreateInfo(m_pointsStagingBuffer.sizeBytes(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-    VmaAllocationCreateInfo stagingBuffAllocCreateInfo = {};
-    stagingBuffAllocCreateInfo.usage            = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
-    stagingBuffAllocCreateInfo.flags            = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
-    stagingBuffAllocCreateInfo.requiredFlags    = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    vmaCreateBuffer(m_vmaAllocator, &stagingBuffCreateInfo, &stagingBuffAllocCreateInfo, &m_pointsStagingBuffer.buffer, &m_pointsStagingBuffer.allocation, nullptr);
-
-    // Copy point data to staging buffer
-    vkIo::Point* pointsMapped;
-    vmaMapMemory(m_vmaAllocator, m_pointsStagingBuffer.allocation, (void**) &pointsMapped);
-    std::memcpy(pointsMapped, pointData.data(), m_pointsStagingBuffer.sizeBytes());
-    vmaUnmapMemory(m_vmaAllocator, m_pointsStagingBuffer.allocation);
-    vmaFlushAllocation(m_vmaAllocator, m_pointsStagingBuffer.allocation, 0U, VK_WHOLE_SIZE);
-
-    // Copy point data from staging buffer to device memory buffer using immediate submit and wait for operation completion host-side
-    VkBufferCopy stagingCopy    = {};
-    stagingCopy.srcOffset       = 0;
-    stagingCopy.dstOffset       = 0;
-    stagingCopy.size            = m_pointsStagingBuffer.sizeBytes();
-    VK_CHECK(vkResetFences(m_logicalDevice, 1, &m_immediateFence));
-    VK_CHECK(vkResetCommandBuffer(m_immediateCommandBuffer, 0));
-	VkCommandBufferBeginInfo cmdBeginInfo = commandBufferBeginInfo(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT); // This buffer will be submitted only once
-	VK_CHECK(vkBeginCommandBuffer(m_immediateCommandBuffer, &cmdBeginInfo));
-    vkCmdCopyBuffer(m_immediateCommandBuffer, m_pointsStagingBuffer.buffer, m_pointsBuffer.buffer, 1, &stagingCopy);
-    VK_CHECK(vkEndCommandBuffer(m_immediateCommandBuffer));
-    VkCommandBufferSubmitInfo cmdinfo   = commandBufferSubmitInfo(m_immediateCommandBuffer);	
-	VkSubmitInfo2 submit                = submitInfo(&cmdinfo, nullptr, nullptr);	
-    VK_CHECK(vkQueueSubmit2(m_graphicsQueue, 1, &submit, m_immediateFence));
-    VK_CHECK(vkWaitForFences(m_logicalDevice, 1, &m_immediateFence, true, vkIo::TRANSFER_TIMEOUT_NS));
-
-    // Register created resources with global destruction queue
+    // Create buffers and register device-side buffer with global destruction queue
+    createPointBuffer();
     m_globalResourceDeletor.pushFunction([&]() {
 		vmaDestroyBuffer(m_vmaAllocator, m_pointsBuffer.buffer, m_pointsBuffer.allocation);
-        vmaDestroyBuffer(m_vmaAllocator, m_pointsStagingBuffer.buffer, m_pointsStagingBuffer.allocation);
 	});
 }
 
@@ -359,19 +319,7 @@ void vkEngine::VulkanEngine::initDescriptors() {
     // Common
 	m_pointRenderDataDescriptors = m_globalDescriptorAllocator.allocate(m_logicalDevice, m_pointRenderDataDescriptorLayout);	
 	// Point buffer
-    VkDescriptorBufferInfo bufferInfo = {};
-    bufferInfo.buffer   = m_pointsBuffer.buffer;
-    bufferInfo.offset   = 0;
-    bufferInfo.range    = VK_WHOLE_SIZE;
-    VkWriteDescriptorSet pointBufferWrite = {};
-    pointBufferWrite.sType              = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	pointBufferWrite.pNext              = nullptr;
-	pointBufferWrite.dstBinding         = 0;
-	pointBufferWrite.dstSet             = m_pointRenderDataDescriptors;
-	pointBufferWrite.descriptorCount    = 1;
-	pointBufferWrite.descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	pointBufferWrite.pBufferInfo        = &bufferInfo;
-	vkUpdateDescriptorSets(m_logicalDevice, 1, &pointBufferWrite, 0, nullptr);
+    updateDescriptorPointBuffer();
     // Packed data image
     VkDescriptorImageInfo packedDataImgInfo = {};
 	packedDataImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -574,6 +522,78 @@ void vkEngine::VulkanEngine::immediateSubmit(std::function<void(VkCommandBuffer 
 	VK_CHECK(vkWaitForFences(m_logicalDevice, 1, &m_immediateFence, true, BLOCKING_TIMEOUT_NS));
 }
 
+void vkEngine::VulkanEngine::createPointBuffer() {
+    // Load point cloud data
+    std::vector<vkIo::Point> pointData = vkIo::readPointCloud(m_config.currentPointFile.string(), m_modelMin, m_modelMax);
+
+    // Init buffers
+    // Common
+    m_pointsBuffer.size = m_pointsStagingBuffer.size = pointData.size();
+    // Device buffer
+    VkBufferCreateInfo devBuffCreateInfo = vkEngine::bufferExclusiveCreateInfo(m_pointsBuffer.sizeBytes(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    VmaAllocationCreateInfo devBuffAllocCreateInfo = {};
+	devBuffAllocCreateInfo.usage            = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+	devBuffAllocCreateInfo.requiredFlags    = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    vmaCreateBuffer(m_vmaAllocator, &devBuffCreateInfo, &devBuffAllocCreateInfo, &m_pointsBuffer.buffer, &m_pointsBuffer.allocation, nullptr);
+    // Host/Staging buffer
+    VkBufferCreateInfo stagingBuffCreateInfo = vkEngine::bufferExclusiveCreateInfo(m_pointsStagingBuffer.sizeBytes(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    VmaAllocationCreateInfo stagingBuffAllocCreateInfo = {};
+    stagingBuffAllocCreateInfo.usage            = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+    stagingBuffAllocCreateInfo.flags            = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+    stagingBuffAllocCreateInfo.requiredFlags    = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    vmaCreateBuffer(m_vmaAllocator, &stagingBuffCreateInfo, &stagingBuffAllocCreateInfo, &m_pointsStagingBuffer.buffer, &m_pointsStagingBuffer.allocation, nullptr);
+
+    // Copy point data to staging buffer
+    vkIo::Point* pointsMapped;
+    vmaMapMemory(m_vmaAllocator, m_pointsStagingBuffer.allocation, (void**) &pointsMapped);
+    std::memcpy(pointsMapped, pointData.data(), m_pointsStagingBuffer.sizeBytes());
+    vmaUnmapMemory(m_vmaAllocator, m_pointsStagingBuffer.allocation);
+    vmaFlushAllocation(m_vmaAllocator, m_pointsStagingBuffer.allocation, 0U, VK_WHOLE_SIZE);
+
+    // Copy point data from staging buffer to device memory buffer using immediate submit and wait for operation completion host-side
+    VkBufferCopy stagingCopy    = {};
+    stagingCopy.srcOffset       = 0;
+    stagingCopy.dstOffset       = 0;
+    stagingCopy.size            = m_pointsStagingBuffer.sizeBytes();
+    VK_CHECK(vkResetFences(m_logicalDevice, 1, &m_immediateFence));
+    VK_CHECK(vkResetCommandBuffer(m_immediateCommandBuffer, 0));
+	VkCommandBufferBeginInfo cmdBeginInfo = commandBufferBeginInfo(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT); // This buffer will be submitted only once
+	VK_CHECK(vkBeginCommandBuffer(m_immediateCommandBuffer, &cmdBeginInfo));
+    vkCmdCopyBuffer(m_immediateCommandBuffer, m_pointsStagingBuffer.buffer, m_pointsBuffer.buffer, 1, &stagingCopy);
+    VK_CHECK(vkEndCommandBuffer(m_immediateCommandBuffer));
+    VkCommandBufferSubmitInfo cmdinfo   = commandBufferSubmitInfo(m_immediateCommandBuffer);	
+	VkSubmitInfo2 submit                = submitInfo(&cmdinfo, nullptr, nullptr);	
+    VK_CHECK(vkQueueSubmit2(m_graphicsQueue, 1, &submit, m_immediateFence));
+    VK_CHECK(vkWaitForFences(m_logicalDevice, 1, &m_immediateFence, true, vkIo::TRANSFER_TIMEOUT_NS));
+
+    // Destroy staging buffer
+    vmaDestroyBuffer(m_vmaAllocator, m_pointsStagingBuffer.buffer, m_pointsStagingBuffer.allocation);
+}
+
+void vkEngine::VulkanEngine::reloadPointData() {
+    AllocatedBuffer oldBuffer = m_pointsBuffer;
+    createPointBuffer();
+    updateDescriptorPointBuffer();
+    vmaDestroyBuffer(m_vmaAllocator, oldBuffer.buffer, oldBuffer.allocation);
+    m_config.loadNewFile = false;
+}
+
+void vkEngine::VulkanEngine::updateDescriptorPointBuffer() {
+    VkDescriptorBufferInfo bufferInfo = {};
+    bufferInfo.buffer   = m_pointsBuffer.buffer;
+    bufferInfo.offset   = 0;
+    bufferInfo.range    = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet pointBufferWrite = {};
+    pointBufferWrite.sType              = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	pointBufferWrite.pNext              = nullptr;
+	pointBufferWrite.dstBinding         = 0;
+	pointBufferWrite.dstSet             = m_pointRenderDataDescriptors;
+	pointBufferWrite.descriptorCount    = 1;
+	pointBufferWrite.descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	pointBufferWrite.pBufferInfo        = &bufferInfo;
+	vkUpdateDescriptorSets(m_logicalDevice, 1, &pointBufferWrite, 0, nullptr);
+}
+
 void vkEngine::VulkanEngine::draw() {
     // Acquire current frame command and sync primitives handles
     FrameDataCommands& currentFrameGraphicsCommandResources         = commandGetCurrentFrame(vkb::QueueType::graphics);
@@ -707,11 +727,19 @@ void vkEngine::VulkanEngine::run() {
                 case SDL_KEYUP: {
                     if (event.key.keysym.sym == SDLK_ESCAPE) { shouldRun = false; }
                 } break;
+                case SDL_MOUSEMOTION:
+                case SDL_MOUSEWHEEL: {
+                    ImGuiIO imguiIo = ImGui::GetIO();
+                    if (!imguiIo.WantCaptureMouse) { m_objectControls.processMouseEvent(event); }
+                } break;
             }
 
             // Send event to ImGUI for its processing
             ImGui_ImplSDL2_ProcessEvent(&event);
         }
+
+        // Load new point file if requested from GUI
+        if (m_config.loadNewFile) { reloadPointData(); }
 
         // Do not draw if we are minimized
         if (!m_shouldRender) {
