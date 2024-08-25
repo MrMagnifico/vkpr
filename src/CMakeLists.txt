@@ -5,11 +5,11 @@ add_executable(vkpr
   "engine/vk_descriptors.cpp"
   "engine/vk_pipelines.cpp"
   "engine/vk_engine.cpp"
-  "engine/vk_loader.cpp"
 
   "io/points.cpp"
   
   "ui/menu.cpp"
+  "ui/object_controls.cpp"
 
   "utils/resource_management.cpp"
 
@@ -26,6 +26,7 @@ target_link_libraries(vkpr PUBLIC vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2
 target_precompile_headers(vkpr PUBLIC <optional> <vector> <memory> <string> <vector> <unordered_map> <glm/mat4x4.hpp>  <glm/vec4.hpp> <vulkan/vulkan.h>)
 
 add_custom_command(TARGET vkpr POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_RUNTIME_DLLS:vkpr> $<TARGET_FILE_DIR:vkpr>
+  COMMAND ${CMAKE_COMMAND} -E copy -t $<TARGET_FILE_DIR:vkpr> $<TARGET_RUNTIME_DLLS:vkpr>
   COMMAND_EXPAND_LISTS
   )
+  

@@ -15,5 +15,8 @@ private:
     // Externally owned state
     vkCommon::Config& m_config;
     const nfdwindowhandle_t& m_nfdSdlWindowHandle;
+
+    void drawFileControls();
+    void drawObjectControls();
 };
 }

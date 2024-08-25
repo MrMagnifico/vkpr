@@ -16,6 +16,18 @@ vkUi::Menu::Menu(vkCommon::Config& config, const nfdwindowhandle_t& nfdSdlWindow
 void vkUi::Menu::draw() {
     ImGui::Begin("Controls");
 
+    ImGui::Text("Model");
+    ImGui::Separator();
+    drawFileControls();
+    ImGui::Spacing();
+    ImGui::Text("Object rotation");
+    ImGui::Separator();
+    drawObjectControls();
+
+    ImGui::End();
+}
+
+void vkUi::Menu::drawFileControls() {
     // Show name of currently loaded file
     std::string loadedFileString = std::format("Current file: {}", m_config.currentPointFile.filename().string());
     ImGui::Text(loadedFileString.c_str());
@@ -41,6 +53,9 @@ void vkUi::Menu::draw() {
             NFD_FreePathU8(outPath);
         }
     }
+}
 
-    ImGui::End();
+void vkUi::Menu::drawObjectControls() {
+    ImGui::SliderFloat("Rotation sensitivity", &m_config.rotationSensitivity, 0.0001f, 0.01f, "%.4f");
+    ImGui::SliderFloat("Zoom sensitivity", &m_config.zoomSensitivity, 0.001f, 0.1f, "%.3f");
 }

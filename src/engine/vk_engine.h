@@ -5,6 +5,7 @@
 #include <engine/vk_descriptors.h>
 #include <io/points.h>
 #include <ui/menu.h>
+#include <ui/object_controls.h>
 #include <utils/resource_management.h>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -65,11 +66,11 @@ private:
 		vkCommon::ComputePushConstants pushConstants;
 		pushConstants.numPoints = static_cast<uint32_t>(m_pointsBuffer.size);
 		constexpr float fov	= 45.0f;
-		glm::vec3 center	= (m_modelMin + m_modelMax) * 0.5f;
+		glm::vec3 center	= glm::vec3(0.0f); // Model is assumed to be globally centered
 		float span 			= glm::length(m_modelMin - m_modelMax);
 		auto view 			= glm::lookAt(center + glm::vec3(-0.9f * span, 0, 0.15f * span), center, glm::vec3(0, 0, -1));
 		auto projection 	= glm::perspective(fov, ((float) m_windowExtent.width) / m_windowExtent.height, 0.1f, 2 * span);
-		pushConstants.mvp	= projection * view; // No model transformation (i.e. identity model matrix)
+		pushConstants.mvp	= projection * view * m_objectControls.modelMatrix();
 		return pushConstants;
 	}
 	
@@ -130,6 +131,7 @@ private:
 
 	// UI
 	vkUi::Menu m_menu;
+	vkUi::ObjectControls m_objectControls;
 
 	// Core Vulkan resource initialisation
 	void initVulkan();

@@ -1,6 +1,6 @@
 ﻿# Project metadata
 cmake_minimum_required(VERSION 3.8)
-project("vulkan_guide")
+project("vkpr")
 
 # Third-party libraries
 find_package(Vulkan REQUIRED)

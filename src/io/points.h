@@ -1,6 +1,11 @@
 #pragma once
 
 #include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
+
+#include <string>
+#include <vector>
+
 
 namespace vkIo {
 constexpr uint64_t TRANSFER_TIMEOUT_NS	= 1000000000; // 1000ms

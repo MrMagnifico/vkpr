@@ -28,7 +28,8 @@ vkEngine::VulkanEngine& vkEngine::VulkanEngine::getInstance() {
 }
 
 vkEngine::VulkanEngine::VulkanEngine()
-: m_menu(m_config, m_nfdSdlWindowHandle) {
+: m_menu(m_config, m_nfdSdlWindowHandle)
+, m_objectControls(m_config) {
     // Initialize SDL and create a window with it
     if (SDL_Init(SDL_INIT_VIDEO) != 0) { throw std::runtime_error("Could not initialise SDL"); }
     SDL_WindowFlags window_flags = SDL_WINDOW_VULKAN;
@@ -570,10 +571,10 @@ void vkEngine::VulkanEngine::createPointBuffer() {
 }
 
 void vkEngine::VulkanEngine::reloadPointData() {
-    // Create new buffers, regiter it with descriptor set and flip reload flag
-    vmaDestroyBuffer(m_vmaAllocator, m_pointsBuffer.buffer, m_pointsBuffer.allocation);
+    AllocatedBuffer oldBuffer = m_pointsBuffer;
     createPointBuffer();
     updateDescriptorPointBuffer();
+    vmaDestroyBuffer(m_vmaAllocator, oldBuffer.buffer, oldBuffer.allocation);
     m_config.loadNewFile = false;
 }
 
@@ -725,6 +726,11 @@ void vkEngine::VulkanEngine::run() {
                 } break;
                 case SDL_KEYUP: {
                     if (event.key.keysym.sym == SDLK_ESCAPE) { shouldRun = false; }
+                } break;
+                case SDL_MOUSEMOTION:
+                case SDL_MOUSEWHEEL: {
+                    ImGuiIO imguiIo = ImGui::GetIO();
+                    if (!imguiIo.WantCaptureMouse) { m_objectControls.processMouseEvent(event); }
                 } break;
             }
 

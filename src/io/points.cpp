@@ -19,15 +19,15 @@ std::vector<vkIo::Point> vkIo::readPointCloud(const std::string path, glm::vec3&
     }
     if (!reader.Warning().empty()) { std::cout << "TinyObjReader: " << reader.Warning();}
 
-    // Read position and color data into return vector and compute minimum and maximum bounds
+    // Read position and color data into return vector and compute centroid
     std::cout << "Processing loaded OBJ file..." << std::endl;
-    Point newPoint;
     std::vector<vkIo::Point> points;
     auto& attributes    = reader.GetAttrib();
-    minimum             = glm::vec3(FLT_MAX, FLT_MAX, FLT_MAX);
-    maximum             = glm::vec3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+    glm::vec4 centroid  = glm::vec4(0.0f);
+    glm::vec4 sizeVec   = glm::vec4(static_cast<float>(attributes.vertices.size()));
     for (size_t vertexIdx = 0; vertexIdx < attributes.vertices.size(); vertexIdx += 3) {
         // Read point data
+        Point newPoint;
         newPoint.position   = glm::vec4(attributes.vertices[vertexIdx],
                                         attributes.vertices[vertexIdx + 1],
                                         attributes.vertices[vertexIdx + 2],
@@ -38,9 +38,17 @@ std::vector<vkIo::Point> vkIo::readPointCloud(const std::string path, glm::vec3&
                                         1.0f);
         points.push_back(newPoint);
 
-        // Compute bounds
-        minimum = glm::min(glm::vec3(newPoint.position), minimum);
-        maximum = glm::max(glm::vec3(newPoint.position), maximum);
+        // Compute centroid
+        centroid += newPoint.position / sizeVec;
+    }
+
+    // Center particle positions and compute min-max bounds
+    minimum = glm::vec3(FLT_MAX, FLT_MAX, FLT_MAX);
+    maximum = glm::vec3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+    for (Point& unadjustedPoint : points) {
+        unadjustedPoint.position    -= centroid;
+        minimum                     = glm::min(glm::vec3(unadjustedPoint.position), minimum);
+        maximum                     = glm::max(glm::vec3(unadjustedPoint.position), maximum);
     }
 
     std::cout << "Done loading point data!" << std::endl;
